@@ -185,7 +185,26 @@ function Load-EnvFile {
         return $result
     }
 
-    foreach ($rawLine in Get-Content -Path $Path) {
+    try {
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+        if ($item -isnot [System.IO.FileInfo]) {
+            Write-VerboseInfo "Skipping non-regular env path '$Path'."
+            return $result
+        }
+    } catch {
+        Write-VerboseInfo "Skipping unreadable env path '$Path'."
+        return $result
+    }
+
+    $lines = @()
+    try {
+        $lines = @(Get-Content -LiteralPath $Path -ErrorAction Stop)
+    } catch {
+        Write-VerboseInfo "Skipping env file '$Path' because it could not be read."
+        return $result
+    }
+
+    foreach ($rawLine in $lines) {
         if ($null -eq $rawLine) {
             continue
         }
@@ -285,7 +304,11 @@ function Invoke-CanvaRequest {
         }
 
         if ($null -ne $Body) {
-            $invokeParams["Body"] = ($Body | ConvertTo-Json -Depth 10)
+            if ($Body -is [string]) {
+                $invokeParams["Body"] = $Body
+            } else {
+                $invokeParams["Body"] = ($Body | ConvertTo-Json -Depth 10)
+            }
         }
 
         if ($Scim) {
@@ -294,17 +317,29 @@ function Invoke-CanvaRequest {
 
         return Invoke-RestMethod @invokeParams
     } catch {
-        $response = $_.Exception.Response
-        if ($null -eq $response) {
-            throw
+        $errorDetails = $_.ErrorDetails
+        if ($errorDetails -and -not [string]::IsNullOrWhiteSpace([string]$errorDetails.Message)) {
+            throw "HTTP error calling $Method $Url`n$($errorDetails.Message)"
         }
 
-        $stream = $response.GetResponseStream()
-        $reader = New-Object System.IO.StreamReader($stream)
-        $responseText = $reader.ReadToEnd()
-        $statusCode = [int]$response.StatusCode
+        $fallbackMessage = "Request failed."
+        try {
+            $exceptionMessage = $_.Exception.Message
+            if (-not [string]::IsNullOrWhiteSpace([string]$exceptionMessage)) {
+                $fallbackMessage = [string]$exceptionMessage
+            }
+        } catch {
+            try {
+                $recordText = [string]$_
+                if (-not [string]::IsNullOrWhiteSpace($recordText)) {
+                    $fallbackMessage = $recordText
+                }
+            } catch {
+                # Keep default fallback.
+            }
+        }
 
-        throw "HTTP $statusCode calling $Method $Url`n$responseText"
+        throw "HTTP error calling $Method $Url`n$fallbackMessage"
     }
 }
 
@@ -330,7 +365,7 @@ function Get-OAuthToken {
     }
 
     $body = "grant_type=client_credentials"
-    $response = Invoke-RestMethod -Method "POST" -Uri "https://api.canva.com/auth/v1/oauth/token" -Headers $headers -Body $body
+    $response = Invoke-CanvaRequest -Method "POST" -Url "https://api.canva.com/auth/v1/oauth/token" -Headers $headers -Body $body
 
     if ([string]::IsNullOrWhiteSpace($response.access_token)) {
         throw "OAuth token response did not include access_token."
@@ -906,6 +941,20 @@ try {
         default { throw "Unsupported command: $($script:Command)" }
     }
 } catch {
-    Write-Error $_.Exception.Message
+    $errorMessage = $null
+    $errorDetails = $_.ErrorDetails
+    if ($errorDetails -and -not [string]::IsNullOrWhiteSpace([string]$errorDetails.Message)) {
+        $errorMessage = [string]$errorDetails.Message
+    }
+
+    if ([string]::IsNullOrWhiteSpace($errorMessage)) {
+        try {
+            $errorMessage = [string]$_
+        } catch {
+            $errorMessage = "Request failed. Run with --verbose-output for more details."
+        }
+    }
+
+    Write-Host "[error] $errorMessage"
     exit 1
 }
