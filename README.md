@@ -7,7 +7,7 @@ This repo contains PowerShell CLIs for group administration workflows:
 
 ## Environment Keys By App
 
-Use `./.env` by default for `cursor-group-ops.ps1`, and `./creds.env` by default for `canva-group-ops.ps1`.
+Use `./.env` by default for `cursor-group-ops.ps1`, and `./creds.env` by default for `canva-group-ops.ps1` (with `./.env` also loaded as a fallback).
 You can override either with `--creds-file`.
 
 ### Cursor (`cursor-group-ops.ps1`)

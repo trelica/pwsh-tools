@@ -121,7 +121,7 @@ Common options:
   --user-id <id> | -UserId <id> | -uid <id>
   --team-id <id> | -TeamId <id> | -tid <id>
   --team-name <name> | -TeamName <name> | -tn <name>
-  --creds-file <path> | -CredsFile <path> | -cf <path>   (default: ./creds.env)
+  --creds-file <path> | -CredsFile <path> | -cf <path>   (default: ./creds.env; also loads ./.env)
   --verbose-output | -VerboseOutput | -v
 
 Examples:
@@ -180,11 +180,11 @@ function Get-OptionalProperty {
 function Load-EnvFile {
     param([string]$Path)
 
+    $result = @{}
     if (-not (Test-Path -Path $Path -PathType Leaf)) {
-        throw "Creds file not found: $Path"
+        return $result
     }
 
-    $result = @{}
     foreach ($rawLine in Get-Content -Path $Path) {
         if ($null -eq $rawLine) {
             continue
@@ -216,6 +216,46 @@ function Load-EnvFile {
     }
 
     return $result
+}
+
+function Load-EnvConfig {
+    param([string]$PrimaryPath)
+
+    $combined = @{}
+    $fallbackPath = "./.env"
+
+    foreach ($path in @($fallbackPath, $PrimaryPath)) {
+        if ([string]::IsNullOrWhiteSpace($path)) {
+            continue
+        }
+
+        $envPart = Load-EnvFile -Path $path
+        foreach ($entry in $envPart.GetEnumerator()) {
+            $combined[$entry.Key] = $entry.Value
+        }
+    }
+
+    return $combined
+}
+
+function Get-ConfigValue {
+    param(
+        [hashtable]$EnvMap,
+        [Parameter(Mandatory = $true)]
+        [string]$Key
+    )
+
+    $fromFile = Get-OptionalProperty -InputObject $EnvMap -Name $Key
+    if (-not [string]::IsNullOrWhiteSpace([string]$fromFile)) {
+        return [string]$fromFile
+    }
+
+    $fromProcess = [System.Environment]::GetEnvironmentVariable($Key)
+    if (-not [string]::IsNullOrWhiteSpace([string]$fromProcess)) {
+        return [string]$fromProcess
+    }
+
+    return $null
 }
 
 function Invoke-CanvaRequest {
@@ -275,11 +315,11 @@ function Get-OAuthToken {
         return $script:OAuthToken
     }
 
-    $clientId = $EnvMap["CANVA_OAUTH_CLIENT_ID"]
-    $clientSecret = $EnvMap["CANVA_OAUTH_CLIENT_SECRET"]
+    $clientId = Get-ConfigValue -EnvMap $EnvMap -Key "CANVA_OAUTH_CLIENT_ID"
+    $clientSecret = Get-ConfigValue -EnvMap $EnvMap -Key "CANVA_OAUTH_CLIENT_SECRET"
 
     if ([string]::IsNullOrWhiteSpace($clientId) -or [string]::IsNullOrWhiteSpace($clientSecret)) {
-        throw "Missing CANVA_OAUTH_CLIENT_ID or CANVA_OAUTH_CLIENT_SECRET in creds file."
+        throw "Missing CANVA_OAUTH_CLIENT_ID or CANVA_OAUTH_CLIENT_SECRET (in .env/creds file or process env)."
     }
 
     $basicToken = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("$clientId`:$clientSecret"))
@@ -307,9 +347,9 @@ function Get-ScimToken {
         return $script:ScimToken
     }
 
-    $token = $EnvMap["CANVA_SCIM_TOKEN"]
+    $token = Get-ConfigValue -EnvMap $EnvMap -Key "CANVA_SCIM_TOKEN"
     if ([string]::IsNullOrWhiteSpace($token)) {
-        throw "Missing CANVA_SCIM_TOKEN in creds file."
+        throw "Missing CANVA_SCIM_TOKEN (in .env/creds file or process env)."
     }
 
     $script:ScimToken = $token
@@ -847,7 +887,7 @@ try {
         }
     }
 
-    $envMap = Load-EnvFile -Path $CredsFile
+    $envMap = Load-EnvConfig -PrimaryPath $CredsFile
     if ($script:Command -ne "list-teams") {
         $resolvedTeam = Resolve-Team -EnvMap $envMap
         Write-Info "Using team: $($resolvedTeam.name) ($($resolvedTeam.id))"
