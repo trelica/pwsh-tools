@@ -1,0 +1,909 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$script:AdminBaseUrl = "https://api.cursor.com"
+$script:ScimBaseUrl = $null
+$script:Command = $null
+$script:GroupType = "billing"
+$script:GroupId = $null
+$script:GroupName = $null
+$script:NewName = $null
+$script:UserEmail = $null
+$script:UserId = $null
+$script:CredsFile = "./.env"
+$script:IncludeMembers = $false
+$script:VerboseOutput = $false
+$script:BillingCycle = $null
+$script:ScimBaseUrlOverride = $null
+
+function Parse-Arguments {
+    param([string[]]$InputArgs)
+
+    $argsQueue = [System.Collections.Generic.Queue[string]]::new()
+    foreach ($token in $InputArgs) {
+        $argsQueue.Enqueue($token)
+    }
+
+    while ($argsQueue.Count -gt 0) {
+        $token = $argsQueue.Dequeue()
+
+        switch -Regex ($token) {
+            "^(--help|-Help|-h)$" { $script:Command = "help"; continue }
+            "^(--list-groups|-ListGroups|-lg)$" { $script:Command = "list-groups"; continue }
+            "^(--list-members|-ListMembers|-lm)$" { $script:Command = "list-members"; continue }
+            "^(--create-group|-CreateGroup|-cg)$" { $script:Command = "create-group"; continue }
+            "^(--rename-group|-RenameGroup|-rg)$" { $script:Command = "rename-group"; continue }
+            "^(--remove-group|-RemoveGroup|-dg)$" { $script:Command = "remove-group"; continue }
+            "^(--add-user|-AddUser|-au)$" { $script:Command = "add-user"; continue }
+            "^(--remove-user|-RemoveUser|-ru)$" { $script:Command = "remove-user"; continue }
+            "^(--list-users|-ListUsers|-lu)$" { $script:Command = "list-users"; continue }
+            "^(--include-members|-IncludeMembers|-im)$" { $script:IncludeMembers = $true; continue }
+            "^(--verbose-output|-VerboseOutput|-v)$" { $script:VerboseOutput = $true; continue }
+            "^(--group-type|-GroupType|-gt)$" {
+                if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
+                $script:GroupType = $argsQueue.Dequeue().ToLowerInvariant()
+                continue
+            }
+            "^(--group-id|-GroupId|-gid)$" {
+                if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
+                $script:GroupId = $argsQueue.Dequeue()
+                continue
+            }
+            "^(--group-name|-GroupName|-gn)$" {
+                if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
+                $script:GroupName = $argsQueue.Dequeue()
+                continue
+            }
+            "^(--new-name|-NewName|-nn)$" {
+                if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
+                $script:NewName = $argsQueue.Dequeue()
+                continue
+            }
+            "^(--user-email|-UserEmail|-ue)$" {
+                if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
+                $script:UserEmail = $argsQueue.Dequeue()
+                continue
+            }
+            "^(--user-id|-UserId|-uid)$" {
+                if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
+                $script:UserId = $argsQueue.Dequeue()
+                continue
+            }
+            "^(--billing-cycle|-BillingCycle|-bc)$" {
+                if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
+                $script:BillingCycle = $argsQueue.Dequeue()
+                continue
+            }
+            "^(--scim-base-url|-ScimBaseUrl|-sbu)$" {
+                if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
+                $script:ScimBaseUrlOverride = $argsQueue.Dequeue()
+                continue
+            }
+            "^(--creds-file|-CredsFile|-cf)$" {
+                if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
+                $script:CredsFile = $argsQueue.Dequeue()
+                continue
+            }
+            default {
+                throw "Unknown argument: $token. Run --help for usage."
+            }
+        }
+    }
+}
+
+function Show-Help {
+    @"
+Cursor Group Ops CLI
+
+Commands (choose one):
+  --help | -h
+  --list-users | -lu
+  --list-groups | -lg [--include-members | -im]
+  --list-members | -lm --group-id <id> | --group-name <name>
+  --create-group | -cg --group-name <name>
+  --rename-group | -rg (--group-id <id> | --group-name <name>) --new-name <name>
+  --remove-group | -dg --group-id <id> | --group-name <name>
+  --add-user | -au (--group-id <id> | --group-name <name>) (--user-email <email> | --user-id <id>)
+  --remove-user | -ru (--group-id <id> | --group-name <name>) (--user-email <email> | --user-id <id>)
+
+Common options:
+  --group-type <billing|regular> | -gt <billing|regular>     (default: billing)
+  --group-id <id> | -gid <id>
+  --group-name <name> | -gn <name>
+  --new-name <name> | -nn <name>
+  --user-email <email> | -ue <email>
+  --user-id <id> | -uid <id>
+  --billing-cycle <YYYY-MM-DD> | -bc <YYYY-MM-DD>            (billing groups only)
+  --scim-base-url <url> | -sbu <url>                          (regular groups only)
+  --creds-file <path> | -cf <path>                            (default: ./.env)
+  --include-members | -im
+  --verbose-output | -v
+
+Environment keys (from .env and/or process env):
+  CURSOR_API_KEY
+  CURSOR_SCIM_TOKEN
+  CURSOR_SCIM_BASE_URL
+
+Examples:
+  pwsh ./cursor-group-ops.ps1 -lg
+  pwsh ./cursor-group-ops.ps1 -lg -gt billing -im
+  pwsh ./cursor-group-ops.ps1 -lm -gt billing -gn "Engineering"
+  pwsh ./cursor-group-ops.ps1 -cg -gt billing -gn "Platform"
+  pwsh ./cursor-group-ops.ps1 -au -gt billing -gn "Platform" -ue "user@company.com"
+  pwsh ./cursor-group-ops.ps1 -lg -gt regular
+  pwsh ./cursor-group-ops.ps1 -au -gt regular -gn "Okta Engineering" -ue "user@company.com"
+"@ | Write-Host
+}
+
+function Write-Info {
+    param([string]$Message)
+    Write-Host "[info] $Message"
+}
+
+function Write-VerboseInfo {
+    param([string]$Message)
+    if ($VerboseOutput) {
+        Write-Host "[debug] $Message"
+    }
+}
+
+function Assert-RequiredArgument {
+    param(
+        [string]$Name,
+        [string]$Value
+    )
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "Missing required option: $Name"
+    }
+}
+
+function Get-OptionalProperty {
+    param(
+        [object]$InputObject,
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [object]$DefaultValue = $null
+    )
+
+    if ($null -eq $InputObject) {
+        return $DefaultValue
+    }
+
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $DefaultValue
+    }
+
+    return $property.Value
+}
+
+function Normalize-UrlBase {
+    param([string]$Url)
+    if ([string]::IsNullOrWhiteSpace($Url)) {
+        return $null
+    }
+    $trimmed = $Url.Trim()
+    if ($trimmed.EndsWith("/")) {
+        return $trimmed.TrimEnd("/")
+    }
+    return $trimmed
+}
+
+function Load-EnvFile {
+    param([string]$Path)
+
+    $result = @{}
+    if (-not (Test-Path -Path $Path -PathType Leaf)) {
+        return $result
+    }
+
+    foreach ($rawLine in Get-Content -Path $Path) {
+        if ($null -eq $rawLine) {
+            continue
+        }
+
+        $line = $rawLine.Trim()
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+        if ($line.StartsWith("#")) {
+            continue
+        }
+
+        $firstEquals = $line.IndexOf("=")
+        if ($firstEquals -le 0) {
+            continue
+        }
+
+        $key = $line.Substring(0, $firstEquals).Trim()
+        $value = $line.Substring($firstEquals + 1).Trim()
+        if ($value.StartsWith('"') -and $value.EndsWith('"') -and $value.Length -ge 2) {
+            $value = $value.Substring(1, $value.Length - 2)
+        } elseif ($value.StartsWith("'") -and $value.EndsWith("'") -and $value.Length -ge 2) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        $result[$key] = $value
+    }
+
+    return $result
+}
+
+function Get-ConfigValue {
+    param(
+        [hashtable]$EnvMap,
+        [Parameter(Mandatory = $true)]
+        [string]$Key
+    )
+
+    $fromFile = Get-OptionalProperty -InputObject $EnvMap -Name $Key
+    if (-not [string]::IsNullOrWhiteSpace([string]$fromFile)) {
+        return [string]$fromFile
+    }
+
+    $fromProcess = [System.Environment]::GetEnvironmentVariable($Key)
+    if (-not [string]::IsNullOrWhiteSpace([string]$fromProcess)) {
+        return [string]$fromProcess
+    }
+
+    return $null
+}
+
+function Get-BasicHeaders {
+    param(
+        [hashtable]$EnvMap,
+        [switch]$Json
+    )
+
+    $apiKey = Get-ConfigValue -EnvMap $EnvMap -Key "CURSOR_API_KEY"
+    if ([string]::IsNullOrWhiteSpace($apiKey)) {
+        throw "Missing CURSOR_API_KEY (in creds file or process env)."
+    }
+
+    $basic = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("$apiKey`:" ))
+    $headers = @{
+        "Authorization" = "Basic $basic"
+        "Accept" = "application/json"
+    }
+    if ($Json) {
+        $headers["Content-Type"] = "application/json"
+    }
+    return $headers
+}
+
+function Get-ScimHeaders {
+    param([hashtable]$EnvMap)
+
+    $token = Get-ConfigValue -EnvMap $EnvMap -Key "CURSOR_SCIM_TOKEN"
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        throw "Missing CURSOR_SCIM_TOKEN (required for regular groups / SCIM)."
+    }
+
+    return @{
+        "Authorization" = "Bearer $token"
+        "Accept" = "application/scim+json"
+        "Content-Type" = "application/scim+json"
+    }
+}
+
+function Resolve-ScimBaseUrl {
+    param([hashtable]$EnvMap)
+
+    if ($script:ScimBaseUrl) {
+        return $script:ScimBaseUrl
+    }
+
+    $candidate = $script:ScimBaseUrlOverride
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        $candidate = Get-ConfigValue -EnvMap $EnvMap -Key "CURSOR_SCIM_BASE_URL"
+    }
+
+    $resolved = Normalize-UrlBase -Url $candidate
+    if ([string]::IsNullOrWhiteSpace($resolved)) {
+        throw "Missing CURSOR_SCIM_BASE_URL (or pass --scim-base-url)."
+    }
+
+    $script:ScimBaseUrl = $resolved
+    return $script:ScimBaseUrl
+}
+
+function Invoke-CursorRequest {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("GET", "POST", "PATCH", "DELETE")]
+        [string]$Method,
+        [Parameter(Mandatory = $true)]
+        [string]$Url,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Headers,
+        [object]$Body
+    )
+
+    Write-VerboseInfo "$Method $Url"
+    try {
+        $params = @{
+            Method = $Method
+            Uri = $Url
+            Headers = $Headers
+        }
+        if ($null -ne $Body) {
+            if ($Body -is [string]) {
+                $params["Body"] = $Body
+            } else {
+                $params["Body"] = ($Body | ConvertTo-Json -Depth 20)
+            }
+        }
+        return Invoke-RestMethod @params
+    } catch {
+        $response = $_.Exception.Response
+        if ($null -eq $response) {
+            throw
+        }
+
+        $statusCode = [int]$response.StatusCode
+        $stream = $response.GetResponseStream()
+        $reader = New-Object System.IO.StreamReader($stream)
+        $responseText = $reader.ReadToEnd()
+        throw "HTTP $statusCode calling $Method $Url`n$responseText"
+    }
+}
+
+function Get-AllTeamMembers {
+    param([hashtable]$EnvMap)
+    $headers = Get-BasicHeaders -EnvMap $EnvMap
+    $url = "$($script:AdminBaseUrl)/teams/members"
+    $response = Invoke-CursorRequest -Method "GET" -Url $url -Headers $headers
+    return @(Get-OptionalProperty -InputObject $response -Name "teamMembers" -DefaultValue @())
+}
+
+function Get-BillingGroupsResponse {
+    param([hashtable]$EnvMap)
+
+    $headers = Get-BasicHeaders -EnvMap $EnvMap
+    $url = "$($script:AdminBaseUrl)/teams/groups"
+    if (-not [string]::IsNullOrWhiteSpace($BillingCycle)) {
+        $url = "$url?billingCycle=$([System.Uri]::EscapeDataString($BillingCycle))"
+    }
+
+    return Invoke-CursorRequest -Method "GET" -Url $url -Headers $headers
+}
+
+function Get-AllBillingGroups {
+    param([hashtable]$EnvMap)
+
+    $response = Get-BillingGroupsResponse -EnvMap $EnvMap
+    $groups = @(Get-OptionalProperty -InputObject $response -Name "groups" -DefaultValue @())
+    $unassigned = Get-OptionalProperty -InputObject $response -Name "unassignedGroup"
+    if ($unassigned) {
+        $groups += $unassigned
+    }
+    return $groups
+}
+
+function Get-AllScimResources {
+    param(
+        [hashtable]$EnvMap,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Users", "Groups")]
+        [string]$ResourceType
+    )
+
+    $headers = Get-ScimHeaders -EnvMap $EnvMap
+    $base = Resolve-ScimBaseUrl -EnvMap $EnvMap
+    $all = @()
+    $count = 100
+    $startIndex = 1
+
+    while ($true) {
+        $url = "$base/$ResourceType?count=$count&startIndex=$startIndex"
+        $response = Invoke-CursorRequest -Method "GET" -Url $url -Headers $headers
+        $resourcesRaw = Get-OptionalProperty -InputObject $response -Name "Resources"
+        $resources = @()
+        if ($resourcesRaw) {
+            $resources = @($resourcesRaw)
+        }
+        if ($resources.Count -eq 0) {
+            break
+        }
+
+        $all += $resources
+
+        $totalResults = Get-OptionalProperty -InputObject $response -Name "totalResults"
+        if ($totalResults -and $all.Count -ge [int]$totalResults) {
+            break
+        }
+        $startIndex += $resources.Count
+    }
+
+    return $all
+}
+
+function Get-AllScimGroups {
+    param([hashtable]$EnvMap)
+    return Get-AllScimResources -EnvMap $EnvMap -ResourceType "Groups"
+}
+
+function Get-AllScimUsers {
+    param([hashtable]$EnvMap)
+    return Get-AllScimResources -EnvMap $EnvMap -ResourceType "Users"
+}
+
+function Resolve-BillingGroup {
+    param([hashtable]$EnvMap)
+
+    $groups = Get-AllBillingGroups -EnvMap $EnvMap
+    if ([string]::IsNullOrWhiteSpace($GroupId) -and [string]::IsNullOrWhiteSpace($GroupName)) {
+        throw "Provide either --group-id or --group-name."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($GroupId)) {
+        $match = @($groups | Where-Object { $_.id -eq $GroupId })
+        if ($match.Count -eq 0) {
+            throw "Billing group ID '$GroupId' was not found."
+        }
+        return $match[0]
+    }
+
+    $nameMatches = @($groups | Where-Object { $_.name -eq $GroupName })
+    if ($nameMatches.Count -eq 0) {
+        throw "Billing group '$GroupName' was not found."
+    }
+    if ($nameMatches.Count -gt 1) {
+        throw "Multiple billing groups matched '$GroupName'. Use --group-id."
+    }
+    return $nameMatches[0]
+}
+
+function Resolve-ScimGroup {
+    param([hashtable]$EnvMap)
+
+    $groups = Get-AllScimGroups -EnvMap $EnvMap
+    if ([string]::IsNullOrWhiteSpace($GroupId) -and [string]::IsNullOrWhiteSpace($GroupName)) {
+        throw "Provide either --group-id or --group-name."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($GroupId)) {
+        $match = @($groups | Where-Object { $_.id -eq $GroupId })
+        if ($match.Count -eq 0) {
+            throw "SCIM group ID '$GroupId' was not found."
+        }
+        return $match[0]
+    }
+
+    $nameMatches = @($groups | Where-Object { $_.displayName -eq $GroupName })
+    if ($nameMatches.Count -eq 0) {
+        throw "SCIM group '$GroupName' was not found."
+    }
+    if ($nameMatches.Count -gt 1) {
+        throw "Multiple SCIM groups matched '$GroupName'. Use --group-id."
+    }
+    return $nameMatches[0]
+}
+
+function Resolve-BillingUserId {
+    param([hashtable]$EnvMap)
+
+    if (-not [string]::IsNullOrWhiteSpace($UserId)) {
+        return $UserId
+    }
+
+    Assert-RequiredArgument -Name "--user-email" -Value $UserEmail
+    $members = Get-AllTeamMembers -EnvMap $EnvMap
+    $matches = @($members | Where-Object { $_.email -and $_.email.ToLowerInvariant() -eq $UserEmail.ToLowerInvariant() })
+    if ($matches.Count -eq 0) {
+        throw "No team member found with email '$UserEmail'."
+    }
+    if ($matches.Count -gt 1) {
+        throw "Multiple team members matched '$UserEmail'. Use --user-id."
+    }
+
+    return [string]$matches[0].id
+}
+
+function Get-ScimUserEmail {
+    param([object]$ScimUser)
+
+    $emails = Get-OptionalProperty -InputObject $ScimUser -Name "emails"
+    if ($emails) {
+        $primary = @($emails | Where-Object { (Get-OptionalProperty -InputObject $_ -Name "primary" -DefaultValue $false) -eq $true }) | Select-Object -First 1
+        if ($primary) {
+            $val = Get-OptionalProperty -InputObject $primary -Name "value"
+            if (-not [string]::IsNullOrWhiteSpace([string]$val)) {
+                return [string]$val
+            }
+        }
+
+        $first = @($emails) | Select-Object -First 1
+        if ($first) {
+            $val = Get-OptionalProperty -InputObject $first -Name "value"
+            if (-not [string]::IsNullOrWhiteSpace([string]$val)) {
+                return [string]$val
+            }
+        }
+    }
+
+    $userName = Get-OptionalProperty -InputObject $ScimUser -Name "userName"
+    if (-not [string]::IsNullOrWhiteSpace([string]$userName)) {
+        return [string]$userName
+    }
+
+    return $null
+}
+
+function Resolve-ScimUserId {
+    param([hashtable]$EnvMap)
+
+    if (-not [string]::IsNullOrWhiteSpace($UserId)) {
+        return $UserId
+    }
+
+    Assert-RequiredArgument -Name "--user-email" -Value $UserEmail
+    $users = Get-AllScimUsers -EnvMap $EnvMap
+    $needle = $UserEmail.ToLowerInvariant()
+    $matches = @()
+    foreach ($user in $users) {
+        $email = Get-ScimUserEmail -ScimUser $user
+        if ($email -and $email.ToLowerInvariant() -eq $needle) {
+            $matches += $user
+        }
+    }
+
+    if ($matches.Count -eq 0) {
+        throw "No SCIM user found with email '$UserEmail'."
+    }
+    if ($matches.Count -gt 1) {
+        throw "Multiple SCIM users matched '$UserEmail'. Use --user-id."
+    }
+
+    return [string]$matches[0].id
+}
+
+function List-Users {
+    param([hashtable]$EnvMap)
+
+    if ($GroupType -eq "regular") {
+        $users = Get-AllScimUsers -EnvMap $EnvMap
+        Write-Info "SCIM users: $($users.Count)"
+        $rows = @()
+        foreach ($u in $users) {
+            $rows += [PSCustomObject]@{
+                id = [string](Get-OptionalProperty -InputObject $u -Name "id")
+                userName = [string](Get-OptionalProperty -InputObject $u -Name "userName")
+                email = Get-ScimUserEmail -ScimUser $u
+                active = Get-OptionalProperty -InputObject $u -Name "active"
+                displayName = [string](Get-OptionalProperty -InputObject $u -Name "displayName")
+            }
+        }
+
+        $rows | Sort-Object -Property email, userName | Format-Table -AutoSize
+        return
+    }
+
+    $members = Get-AllTeamMembers -EnvMap $EnvMap
+    Write-Info "Team members: $($members.Count)"
+    $members |
+        Select-Object @{Name = "id"; Expression = { [string]$_.id } }, name, email, role, isRemoved |
+        Sort-Object -Property email |
+        Format-Table -AutoSize
+}
+
+function List-BillingGroups {
+    param([hashtable]$EnvMap)
+
+    $response = Get-BillingGroupsResponse -EnvMap $EnvMap
+    $groups = @()
+    $normalGroups = @(Get-OptionalProperty -InputObject $response -Name "groups" -DefaultValue @())
+    if ($normalGroups.Count -gt 0) {
+        $groups += $normalGroups
+    }
+
+    $unassigned = Get-OptionalProperty -InputObject $response -Name "unassignedGroup"
+    if ($unassigned) {
+        $groups += $unassigned
+    }
+
+    Write-Info "Billing groups: $($groups.Count)"
+
+    if (-not $IncludeMembers) {
+        $groups |
+            Select-Object id, name, type, directoryGroupId, memberCount, spendCents, createdAt, updatedAt |
+            Sort-Object -Property name |
+            Format-Table -AutoSize
+        return
+    }
+
+    foreach ($group in ($groups | Sort-Object -Property name)) {
+        Write-Host ""
+        Write-Host "[$($group.id)] $($group.name) type=$($group.type) members=$($group.memberCount) spendCents=$($group.spendCents)"
+
+        $currentMembers = @(Get-OptionalProperty -InputObject $group -Name "currentMembers" -DefaultValue @())
+        if ($currentMembers.Count -eq 0) {
+            Write-Host "  Current members: (none)"
+        } else {
+            Write-Host "  Current members: $($currentMembers.Count)"
+            foreach ($m in $currentMembers) {
+                Write-Host "   - $($m.userId) | $($m.email) | $($m.name) | joined=$($m.joinedAt)"
+            }
+        }
+
+        $formerMembers = @(Get-OptionalProperty -InputObject $group -Name "formerMembers" -DefaultValue @())
+        if ($formerMembers.Count -gt 0) {
+            Write-Host "  Former members: $($formerMembers.Count)"
+            foreach ($m in $formerMembers) {
+                Write-Host "   - $($m.userId) | $($m.email) | $($m.name) | left=$($m.leftAt)"
+            }
+        }
+    }
+}
+
+function List-ScimGroups {
+    param([hashtable]$EnvMap)
+
+    $groups = Get-AllScimGroups -EnvMap $EnvMap
+    Write-Info "Regular groups (SCIM): $($groups.Count)"
+
+    if (-not $IncludeMembers) {
+        $groups |
+            Select-Object id, displayName, externalId |
+            Sort-Object -Property displayName |
+            Format-Table -AutoSize
+        return
+    }
+
+    foreach ($group in ($groups | Sort-Object -Property displayName)) {
+        Write-Host ""
+        Write-Host "[$($group.id)] $($group.displayName)"
+        $members = @(Get-OptionalProperty -InputObject $group -Name "members" -DefaultValue @())
+        if ($members.Count -eq 0) {
+            Write-Host "  Members: (none)"
+            continue
+        }
+
+        Write-Host "  Members: $($members.Count)"
+        foreach ($member in $members) {
+            Write-Host "   - $($member.value) | $($member.display)"
+        }
+    }
+}
+
+function List-Groups {
+    param([hashtable]$EnvMap)
+    if ($GroupType -eq "regular") {
+        List-ScimGroups -EnvMap $EnvMap
+        return
+    }
+    List-BillingGroups -EnvMap $EnvMap
+}
+
+function List-GroupMembers {
+    param([hashtable]$EnvMap)
+
+    if ($GroupType -eq "regular") {
+        $group = Resolve-ScimGroup -EnvMap $EnvMap
+        $members = @(Get-OptionalProperty -InputObject $group -Name "members" -DefaultValue @())
+        Write-Info "SCIM group: $($group.displayName) ($($group.id))"
+        Write-Info "Members: $($members.Count)"
+        $members |
+            Select-Object @{Name = "userId"; Expression = { $_.value } }, display, type |
+            Sort-Object -Property display, userId |
+            Format-Table -AutoSize
+        return
+    }
+
+    $group = Resolve-BillingGroup -EnvMap $EnvMap
+    $headers = Get-BasicHeaders -EnvMap $EnvMap
+    $url = "$($script:AdminBaseUrl)/teams/groups/$([System.Uri]::EscapeDataString($group.id))"
+    if (-not [string]::IsNullOrWhiteSpace($BillingCycle)) {
+        $url = "$url?billingCycle=$([System.Uri]::EscapeDataString($BillingCycle))"
+    }
+
+    $response = Invoke-CursorRequest -Method "GET" -Url $url -Headers $headers
+    $groupPayload = Get-OptionalProperty -InputObject $response -Name "group"
+    if (-not $groupPayload) {
+        throw "Group payload missing from API response."
+    }
+
+    $currentMembers = @(Get-OptionalProperty -InputObject $groupPayload -Name "currentMembers" -DefaultValue @())
+    $formerMembers = @(Get-OptionalProperty -InputObject $groupPayload -Name "formerMembers" -DefaultValue @())
+
+    Write-Info "Billing group: $($groupPayload.name) ($($groupPayload.id))"
+    Write-Info "Current members: $($currentMembers.Count)"
+    if ($currentMembers.Count -gt 0) {
+        $currentMembers |
+            Select-Object userId, name, email, joinedAt, leftAt, spendCents |
+            Sort-Object -Property email, userId |
+            Format-Table -AutoSize
+    }
+
+    if ($formerMembers.Count -gt 0) {
+        Write-Host ""
+        Write-Info "Former members: $($formerMembers.Count)"
+        $formerMembers |
+            Select-Object userId, name, email, joinedAt, leftAt, spendCents |
+            Sort-Object -Property email, userId |
+            Format-Table -AutoSize
+    }
+}
+
+function Create-Group {
+    param([hashtable]$EnvMap)
+    Assert-RequiredArgument -Name "--group-name" -Value $GroupName
+
+    if ($GroupType -eq "regular") {
+        $headers = Get-ScimHeaders -EnvMap $EnvMap
+        $base = Resolve-ScimBaseUrl -EnvMap $EnvMap
+        $url = "$base/Groups"
+        $body = @{
+            schemas = @("urn:ietf:params:scim:schemas:core:2.0:Group")
+            displayName = $GroupName
+        }
+        $response = Invoke-CursorRequest -Method "POST" -Url $url -Headers $headers -Body $body
+        Write-Info "Created SCIM group '$($response.displayName)' with ID $($response.id)."
+        return
+    }
+
+    $headers = Get-BasicHeaders -EnvMap $EnvMap -Json
+    $url = "$($script:AdminBaseUrl)/teams/groups"
+    $body = @{
+        name = $GroupName
+        type = "BILLING"
+    }
+    $response = Invoke-CursorRequest -Method "POST" -Url $url -Headers $headers -Body $body
+    $group = Get-OptionalProperty -InputObject $response -Name "group"
+    if (-not $group) {
+        throw "Group payload missing from create response."
+    }
+    Write-Info "Created billing group '$($group.name)' with ID $($group.id)."
+}
+
+function Rename-Group {
+    param([hashtable]$EnvMap)
+    Assert-RequiredArgument -Name "--new-name" -Value $NewName
+
+    if ($GroupType -eq "regular") {
+        $group = Resolve-ScimGroup -EnvMap $EnvMap
+        $headers = Get-ScimHeaders -EnvMap $EnvMap
+        $base = Resolve-ScimBaseUrl -EnvMap $EnvMap
+        $url = "$base/Groups/$([System.Uri]::EscapeDataString($group.id))"
+        $body = @{
+            schemas = @("urn:ietf:params:scim:api:messages:2.0:PatchOp")
+            Operations = @(
+                @{
+                    op = "replace"
+                    path = "displayName"
+                    value = $NewName
+                }
+            )
+        }
+
+        Invoke-CursorRequest -Method "PATCH" -Url $url -Headers $headers -Body $body | Out-Null
+        Write-Info "Renamed SCIM group '$($group.displayName)' -> '$NewName' (ID $($group.id))."
+        return
+    }
+
+    $group = Resolve-BillingGroup -EnvMap $EnvMap
+    $headers = Get-BasicHeaders -EnvMap $EnvMap -Json
+    $url = "$($script:AdminBaseUrl)/teams/groups/$([System.Uri]::EscapeDataString($group.id))"
+    $body = @{ name = $NewName }
+    $response = Invoke-CursorRequest -Method "PATCH" -Url $url -Headers $headers -Body $body
+    $updated = Get-OptionalProperty -InputObject $response -Name "group"
+    if (-not $updated) {
+        throw "Group payload missing from rename response."
+    }
+    Write-Info "Renamed billing group '$($group.name)' -> '$($updated.name)' (ID $($updated.id))."
+}
+
+function Remove-Group {
+    param([hashtable]$EnvMap)
+
+    if ($GroupType -eq "regular") {
+        $group = Resolve-ScimGroup -EnvMap $EnvMap
+        $headers = Get-ScimHeaders -EnvMap $EnvMap
+        $base = Resolve-ScimBaseUrl -EnvMap $EnvMap
+        $url = "$base/Groups/$([System.Uri]::EscapeDataString($group.id))"
+        Invoke-CursorRequest -Method "DELETE" -Url $url -Headers $headers | Out-Null
+        Write-Info "Deleted SCIM group '$($group.displayName)' (ID $($group.id))."
+        return
+    }
+
+    $group = Resolve-BillingGroup -EnvMap $EnvMap
+    $headers = Get-BasicHeaders -EnvMap $EnvMap
+    $url = "$($script:AdminBaseUrl)/teams/groups/$([System.Uri]::EscapeDataString($group.id))"
+    Invoke-CursorRequest -Method "DELETE" -Url $url -Headers $headers | Out-Null
+    Write-Info "Deleted billing group '$($group.name)' (ID $($group.id))."
+}
+
+function Update-GroupMembership {
+    param(
+        [hashtable]$EnvMap,
+        [ValidateSet("add", "remove")]
+        [string]$Operation
+    )
+
+    if ($GroupType -eq "regular") {
+        $group = Resolve-ScimGroup -EnvMap $EnvMap
+        $targetUserId = Resolve-ScimUserId -EnvMap $EnvMap
+        $headers = Get-ScimHeaders -EnvMap $EnvMap
+        $base = Resolve-ScimBaseUrl -EnvMap $EnvMap
+        $url = "$base/Groups/$([System.Uri]::EscapeDataString($group.id))"
+        $body = @{
+            schemas = @("urn:ietf:params:scim:api:messages:2.0:PatchOp")
+            Operations = @(
+                @{
+                    op = $Operation
+                    path = "members"
+                    value = @(@{ value = $targetUserId })
+                }
+            )
+        }
+
+        Invoke-CursorRequest -Method "PATCH" -Url $url -Headers $headers -Body $body | Out-Null
+        Write-Info "$Operation user '$targetUserId' in SCIM group '$($group.displayName)' (ID $($group.id))."
+        return
+    }
+
+    $group = Resolve-BillingGroup -EnvMap $EnvMap
+    $targetUserId = Resolve-BillingUserId -EnvMap $EnvMap
+    $headers = Get-BasicHeaders -EnvMap $EnvMap -Json
+    $url = "$($script:AdminBaseUrl)/teams/groups/$([System.Uri]::EscapeDataString($group.id))/members"
+    $body = @{ userIds = @([string]$targetUserId) }
+
+    if ($Operation -eq "add") {
+        Invoke-CursorRequest -Method "POST" -Url $url -Headers $headers -Body $body | Out-Null
+    } else {
+        Invoke-CursorRequest -Method "DELETE" -Url $url -Headers $headers -Body $body | Out-Null
+    }
+
+    Write-Info "$Operation user '$targetUserId' in billing group '$($group.name)' (ID $($group.id))."
+}
+
+try {
+    Parse-Arguments -InputArgs $args
+
+    if (-not $script:Command) {
+        Show-Help
+        throw "No command provided."
+    }
+
+    if ($script:Command -eq "help") {
+        Show-Help
+        exit 0
+    }
+
+    if ($GroupType -notin @("billing", "regular")) {
+        throw "Unsupported --group-type '$GroupType'. Allowed: billing, regular."
+    }
+
+    if ($script:Command -in @("list-members", "rename-group", "remove-group", "add-user", "remove-user")) {
+        if ([string]::IsNullOrWhiteSpace($GroupId) -and [string]::IsNullOrWhiteSpace($GroupName)) {
+            throw "Provide either --group-id or --group-name."
+        }
+    }
+
+    if ($script:Command -in @("add-user", "remove-user")) {
+        if ([string]::IsNullOrWhiteSpace($UserId) -and [string]::IsNullOrWhiteSpace($UserEmail)) {
+            throw "Provide either --user-id or --user-email."
+        }
+    }
+
+    $envMap = Load-EnvFile -Path $CredsFile
+    if ($envMap.Count -eq 0) {
+        Write-VerboseInfo "No env file loaded from '$CredsFile'; using process environment only."
+    } else {
+        Write-VerboseInfo "Loaded env keys from '$CredsFile'."
+    }
+
+    switch ($script:Command) {
+        "list-users" { List-Users -EnvMap $envMap }
+        "list-groups" { List-Groups -EnvMap $envMap }
+        "list-members" { List-GroupMembers -EnvMap $envMap }
+        "create-group" { Create-Group -EnvMap $envMap }
+        "rename-group" { Rename-Group -EnvMap $envMap }
+        "remove-group" { Remove-Group -EnvMap $envMap }
+        "add-user" { Update-GroupMembership -EnvMap $envMap -Operation "add" }
+        "remove-user" { Update-GroupMembership -EnvMap $envMap -Operation "remove" }
+        default { throw "Unsupported command: $($script:Command)" }
+    }
+} catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
