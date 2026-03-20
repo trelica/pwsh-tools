@@ -16,7 +16,7 @@ $script:UserEmail = $null
 $script:UserId = $null
 $script:TeamId = $null
 $script:TeamName = $null
-$script:CredsFile = "./creds.env"
+$script:CredsFile = "./.env"
 $script:IncludeMembers = $false
 $script:VerboseOutput = $false
 
@@ -121,7 +121,7 @@ Common options:
   --user-id <id> | -UserId <id> | -uid <id>
   --team-id <id> | -TeamId <id> | -tid <id>
   --team-name <name> | -TeamName <name> | -tn <name>
-  --creds-file <path> | -CredsFile <path> | -cf <path>   (default: ./creds.env; also loads ./.env)
+  --creds-file <path> | -CredsFile <path> | -cf <path>   (default: ./.env)
   --verbose-output | -VerboseOutput | -v
 
 Examples:
@@ -133,6 +133,31 @@ Examples:
   pwsh ./canva-group-ops.ps1 -au -gn "ByteDance" -ue user@company.com
   pwsh ./canva-group-ops.ps1 -au -gn "ByteDance" -uid U1234567890
 "@ | Write-Host
+}
+
+function Read-Prompt {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+        [string]$Default
+    )
+    if (-not [string]::IsNullOrWhiteSpace($Default)) {
+        Write-Host -NoNewline -ForegroundColor Cyan "? "
+        Write-Host -NoNewline "$Message "
+        Write-Host -NoNewline -ForegroundColor DarkGray "[$Default]"
+        Write-Host -NoNewline ": "
+    } else {
+        Write-Host -NoNewline -ForegroundColor Cyan "? "
+        Write-Host -NoNewline "$Message`: "
+    }
+    $value = [Console]::ReadLine()
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        if (-not [string]::IsNullOrWhiteSpace($Default)) {
+            return $Default
+        }
+        throw "No value provided."
+    }
+    return $value.Trim()
 }
 
 function Assert-RequiredArgument {
@@ -185,76 +210,54 @@ function Load-EnvFile {
         return $result
     }
 
+    $reader = $null
     try {
-        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
-        if ($item -isnot [System.IO.FileInfo]) {
-            Write-VerboseInfo "Skipping non-regular env path '$Path'."
-            return $result
-        }
-    } catch {
-        Write-VerboseInfo "Skipping unreadable env path '$Path'."
-        return $result
-    }
-
-    $lines = @()
-    try {
-        $lines = @(Get-Content -LiteralPath $Path -ErrorAction Stop)
+        # Use StreamReader so named pipes/FIFOs (e.g. 1Password local env file) can be read.
+        $reader = [System.IO.File]::OpenText($Path)
     } catch {
         Write-VerboseInfo "Skipping env file '$Path' because it could not be read."
         return $result
     }
 
-    foreach ($rawLine in $lines) {
-        if ($null -eq $rawLine) {
-            continue
-        }
+    try {
+        while (($rawLine = $reader.ReadLine()) -ne $null) {
+            $line = $rawLine.Trim()
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                continue
+            }
+            if ($line.StartsWith("#")) {
+                continue
+            }
 
-        $line = $rawLine.Trim()
-        if ([string]::IsNullOrWhiteSpace($line)) {
-            continue
-        }
-        if ($line.StartsWith("#")) {
-            continue
-        }
+            $firstEquals = $line.IndexOf("=")
+            if ($firstEquals -le 0) {
+                continue
+            }
 
-        $firstEquals = $line.IndexOf("=")
-        if ($firstEquals -le 0) {
-            continue
+            $key = $line.Substring(0, $firstEquals).Trim()
+            if ($key.StartsWith("export ")) {
+                $key = $key.Substring(7).Trim()
+            }
+            if ([string]::IsNullOrWhiteSpace($key)) {
+                continue
+            }
+
+            $value = $line.Substring($firstEquals + 1).Trim()
+            if ($value.StartsWith('"') -and $value.EndsWith('"') -and $value.Length -ge 2) {
+                $value = $value.Substring(1, $value.Length - 2)
+            } elseif ($value.StartsWith("'") -and $value.EndsWith("'") -and $value.Length -ge 2) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+
+            $result[$key] = $value
         }
-
-        $key = $line.Substring(0, $firstEquals).Trim()
-        $value = $line.Substring($firstEquals + 1).Trim()
-
-        if ($value.StartsWith('"') -and $value.EndsWith('"') -and $value.Length -ge 2) {
-            $value = $value.Substring(1, $value.Length - 2)
-        } elseif ($value.StartsWith("'") -and $value.EndsWith("'") -and $value.Length -ge 2) {
-            $value = $value.Substring(1, $value.Length - 2)
+    } finally {
+        if ($reader) {
+            $reader.Dispose()
         }
-
-        $result[$key] = $value
     }
 
     return $result
-}
-
-function Load-EnvConfig {
-    param([string]$PrimaryPath)
-
-    $combined = @{}
-    $fallbackPath = "./.env"
-
-    foreach ($path in @($fallbackPath, $PrimaryPath)) {
-        if ([string]::IsNullOrWhiteSpace($path)) {
-            continue
-        }
-
-        $envPart = Load-EnvFile -Path $path
-        foreach ($entry in $envPart.GetEnumerator()) {
-            $combined[$entry.Key] = $entry.Value
-        }
-    }
-
-    return $combined
 }
 
 function Get-ConfigValue {
@@ -264,9 +267,11 @@ function Get-ConfigValue {
         [string]$Key
     )
 
-    $fromFile = Get-OptionalProperty -InputObject $EnvMap -Name $Key
-    if (-not [string]::IsNullOrWhiteSpace([string]$fromFile)) {
-        return [string]$fromFile
+    if ($EnvMap -and $EnvMap.ContainsKey($Key)) {
+        $fromFile = [string]$EnvMap[$Key]
+        if (-not [string]::IsNullOrWhiteSpace($fromFile)) {
+            return $fromFile
+        }
     }
 
     $fromProcess = [System.Environment]::GetEnvironmentVariable($Key)
@@ -275,6 +280,43 @@ function Get-ConfigValue {
     }
 
     return $null
+}
+
+function Save-EnvValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Key,
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+    $line = "$Key=$Value"
+    if (Test-Path -Path $Path -PathType Leaf) {
+        Add-Content -Path $Path -Value $line
+    } else {
+        Set-Content -Path $Path -Value $line
+    }
+}
+
+function Require-ConfigValue {
+    param(
+        [hashtable]$EnvMap,
+        [Parameter(Mandatory = $true)]
+        [string]$Key,
+        [string]$Prompt
+    )
+    $value = Get-ConfigValue -EnvMap $EnvMap -Key $Key
+    if (-not [string]::IsNullOrWhiteSpace($value)) {
+        return $value
+    }
+    if ([string]::IsNullOrWhiteSpace($Prompt)) {
+        $Prompt = $Key
+    }
+    $value = Read-Prompt -Message $Prompt
+    Save-EnvValue -Path $CredsFile -Key $Key -Value $value
+    $EnvMap[$Key] = $value
+    return $value
 }
 
 function Invoke-CanvaRequest {
@@ -289,9 +331,7 @@ function Invoke-CanvaRequest {
         [Parameter(Mandatory = $true)]
         [hashtable]$Headers,
 
-        [object]$Body,
-
-        [switch]$Scim
+        [object]$Body
     )
 
     Write-VerboseInfo "$Method $Url"
@@ -311,35 +351,19 @@ function Invoke-CanvaRequest {
             }
         }
 
-        if ($Scim) {
-            return Invoke-RestMethod @invokeParams
-        }
-
         return Invoke-RestMethod @invokeParams
     } catch {
-        $errorDetails = $_.ErrorDetails
-        if ($errorDetails -and -not [string]::IsNullOrWhiteSpace([string]$errorDetails.Message)) {
-            throw "HTTP error calling $Method $Url`n$($errorDetails.Message)"
+        $response = $_.Exception.Response
+        if ($null -eq $response) {
+            throw
         }
 
-        $fallbackMessage = "Request failed."
-        try {
-            $exceptionMessage = $_.Exception.Message
-            if (-not [string]::IsNullOrWhiteSpace([string]$exceptionMessage)) {
-                $fallbackMessage = [string]$exceptionMessage
-            }
-        } catch {
-            try {
-                $recordText = [string]$_
-                if (-not [string]::IsNullOrWhiteSpace($recordText)) {
-                    $fallbackMessage = $recordText
-                }
-            } catch {
-                # Keep default fallback.
-            }
+        $statusCode = [int]$response.StatusCode
+        $responseText = $_.ErrorDetails.Message
+        if ([string]::IsNullOrWhiteSpace($responseText)) {
+            $responseText = $response.ReasonPhrase
         }
-
-        throw "HTTP error calling $Method $Url`n$fallbackMessage"
+        throw "HTTP $statusCode calling $Method $Url`n$responseText"
     }
 }
 
@@ -350,12 +374,8 @@ function Get-OAuthToken {
         return $script:OAuthToken
     }
 
-    $clientId = Get-ConfigValue -EnvMap $EnvMap -Key "CANVA_OAUTH_CLIENT_ID"
-    $clientSecret = Get-ConfigValue -EnvMap $EnvMap -Key "CANVA_OAUTH_CLIENT_SECRET"
-
-    if ([string]::IsNullOrWhiteSpace($clientId) -or [string]::IsNullOrWhiteSpace($clientSecret)) {
-        throw "Missing CANVA_OAUTH_CLIENT_ID or CANVA_OAUTH_CLIENT_SECRET (in .env/creds file or process env)."
-    }
+    $clientId = Require-ConfigValue -EnvMap $EnvMap -Key "CANVA_OAUTH_CLIENT_ID" -Prompt "Canva OAuth Client ID"
+    $clientSecret = Require-ConfigValue -EnvMap $EnvMap -Key "CANVA_OAUTH_CLIENT_SECRET" -Prompt "Canva OAuth Client Secret"
 
     $basicToken = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("$clientId`:$clientSecret"))
     $headers = @{
@@ -382,10 +402,7 @@ function Get-ScimToken {
         return $script:ScimToken
     }
 
-    $token = Get-ConfigValue -EnvMap $EnvMap -Key "CANVA_SCIM_TOKEN"
-    if ([string]::IsNullOrWhiteSpace($token)) {
-        throw "Missing CANVA_SCIM_TOKEN (in .env/creds file or process env)."
-    }
+    $token = Require-ConfigValue -EnvMap $EnvMap -Key "CANVA_SCIM_TOKEN" -Prompt "Canva SCIM Token"
 
     $script:ScimToken = $token
     return $script:ScimToken
@@ -522,7 +539,7 @@ function Get-AllScimGroups {
 
     while ($true) {
         $url = "$($script:ScimBaseUrl)/Groups?count=$count&startIndex=$startIndex"
-        $response = Invoke-CanvaRequest -Method "GET" -Url $url -Headers $headers -Scim
+        $response = Invoke-CanvaRequest -Method "GET" -Url $url -Headers $headers
         $resources = @()
         $resourcesProperty = Get-OptionalProperty -InputObject $response -Name "Resources"
         if ($resourcesProperty) {
@@ -859,7 +876,7 @@ function Update-GroupMembership {
         )
     }
 
-    Invoke-CanvaRequest -Method "PATCH" -Url $url -Headers $headers -Body $body -Scim | Out-Null
+    Invoke-CanvaRequest -Method "PATCH" -Url $url -Headers $headers -Body $body | Out-Null
     Write-Info "$Operation user '$targetUserLabel' (id=$targetUserId) in group '$($group.Name)' (scimId=$($group.ScimId))."
 }
 
@@ -897,7 +914,8 @@ try {
 
     if (-not $script:Command) {
         Show-Help
-        throw "No command provided."
+        Write-Host "──────────────────────────────────────────────────────────────"
+        $script:Command = Read-Prompt -Message "Command"
     }
 
     if ($script:Command -eq "help") {
@@ -905,24 +923,28 @@ try {
         exit 0
     }
 
-    if ($script:Command -in @("list-members", "rename-group", "remove-group", "add-user", "remove-user")) {
+    if ($script:Command -in @("list-members", "rename-group", "remove-group", "add-user", "remove-user", "create-group")) {
         if ([string]::IsNullOrWhiteSpace($GroupId) -and [string]::IsNullOrWhiteSpace($GroupName)) {
-            throw "Provide either --group-id or --group-name."
+            $script:GroupName = Read-Prompt -Message "Group name"
         }
     }
-    if ($script:Command -eq "create-group") {
-        Assert-RequiredArgument -Name "--group-name" -Value $GroupName
-    }
     if ($script:Command -eq "rename-group") {
-        Assert-RequiredArgument -Name "--new-name" -Value $NewName
+        if ([string]::IsNullOrWhiteSpace($NewName)) {
+            $script:NewName = Read-Prompt -Message "New name"
+        }
     }
     if ($script:Command -in @("add-user", "remove-user")) {
         if ([string]::IsNullOrWhiteSpace($UserEmail) -and [string]::IsNullOrWhiteSpace($UserId)) {
-            throw "Provide either --user-email or --user-id."
+            $script:UserEmail = Read-Prompt -Message "User email"
         }
     }
 
-    $envMap = Load-EnvConfig -PrimaryPath $CredsFile
+    $envMap = Load-EnvFile -Path $CredsFile
+    if ($envMap.Count -eq 0) {
+        Write-VerboseInfo "No env file loaded from '$CredsFile'; using process environment only."
+    } else {
+        Write-VerboseInfo "Loaded env keys from '$CredsFile'."
+    }
     if ($script:Command -ne "list-teams") {
         $resolvedTeam = Resolve-Team -EnvMap $envMap
         Write-Info "Using team: $($resolvedTeam.name) ($($resolvedTeam.id))"
@@ -941,20 +963,13 @@ try {
         default { throw "Unsupported command: $($script:Command)" }
     }
 } catch {
-    $errorMessage = $null
-    $errorDetails = $_.ErrorDetails
-    if ($errorDetails -and -not [string]::IsNullOrWhiteSpace([string]$errorDetails.Message)) {
-        $errorMessage = [string]$errorDetails.Message
-    }
-
+    $errorMessage = $_.ErrorDetails.Message
     if ([string]::IsNullOrWhiteSpace($errorMessage)) {
-        try {
-            $errorMessage = [string]$_
-        } catch {
-            $errorMessage = "Request failed. Run with --verbose-output for more details."
-        }
+        $errorMessage = [string]$_
     }
-
+    if ([string]::IsNullOrWhiteSpace($errorMessage)) {
+        $errorMessage = "Unexpected error. Run with --verbose-output for details."
+    }
     Write-Host "[error] $errorMessage"
     exit 1
 }

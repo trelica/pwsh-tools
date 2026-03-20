@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pwsh ./cursor-group-ops.ps1 -lg 2>&1)",
+      "Bash(pwsh ./cursor-group-ops.ps1 -lg -v 2>&1)",
+      "Bash(pwsh -c \"Test-Path -Path '.env' -PathType Leaf\")",
+      "Bash(pwsh -c '[System.IO.File]::OpenText\\(\".env\"\\)' 2>&1)",
+      "Bash(pwsh -c '$r = [System.IO.File]::OpenText\\(\".env\"\\); while \\(\\($l = $r.ReadLine\\(\\)\\) -ne $null\\) { $l }; $r.Dispose\\(\\)' 2>&1)",
+      "Bash(pwsh ./cursor-group-ops.ps1 -ru -gt regular -gn \"Generic Group\" -ue \"siqi.zhang@bytedance.com\" -v 2>&1)",
+      "Bash(pwsh ./cursor-group-ops.ps1 -lg -gt regular -v 2>&1)"
+    ]
+  }
+}

@@ -4,7 +4,7 @@ $ErrorActionPreference = "Stop"
 $script:AdminBaseUrl = "https://api.cursor.com"
 $script:ScimBaseUrl = $null
 $script:Command = $null
-$script:GroupType = "billing"
+$script:GroupType = $null
 $script:GroupId = $null
 $script:GroupName = $null
 $script:NewName = $null
@@ -147,6 +147,31 @@ function Write-VerboseInfo {
     }
 }
 
+function Read-Prompt {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+        [string]$Default
+    )
+    if (-not [string]::IsNullOrWhiteSpace($Default)) {
+        Write-Host -NoNewline -ForegroundColor Cyan "? "
+        Write-Host -NoNewline "$Message "
+        Write-Host -NoNewline -ForegroundColor DarkGray "[$Default]"
+        Write-Host -NoNewline ": "
+    } else {
+        Write-Host -NoNewline -ForegroundColor Cyan "? "
+        Write-Host -NoNewline "$Message`: "
+    }
+    $value = [Console]::ReadLine()
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        if (-not [string]::IsNullOrWhiteSpace($Default)) {
+            return $Default
+        }
+        throw "No value provided."
+    }
+    return $value.Trim()
+}
+
 function Assert-RequiredArgument {
     param(
         [string]$Name,
@@ -197,32 +222,51 @@ function Load-EnvFile {
         return $result
     }
 
-    foreach ($rawLine in Get-Content -Path $Path) {
-        if ($null -eq $rawLine) {
-            continue
-        }
+    $reader = $null
+    try {
+        # Use StreamReader so named pipes/FIFOs (e.g. 1Password local env file) can be read.
+        $reader = [System.IO.File]::OpenText($Path)
+    } catch {
+        Write-VerboseInfo "Skipping env file '$Path' because it could not be read."
+        return $result
+    }
 
-        $line = $rawLine.Trim()
-        if ([string]::IsNullOrWhiteSpace($line)) {
-            continue
-        }
-        if ($line.StartsWith("#")) {
-            continue
-        }
+    try {
+        while (($rawLine = $reader.ReadLine()) -ne $null) {
+            $line = $rawLine.Trim()
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                continue
+            }
+            if ($line.StartsWith("#")) {
+                continue
+            }
 
-        $firstEquals = $line.IndexOf("=")
-        if ($firstEquals -le 0) {
-            continue
-        }
+            $firstEquals = $line.IndexOf("=")
+            if ($firstEquals -le 0) {
+                continue
+            }
 
-        $key = $line.Substring(0, $firstEquals).Trim()
-        $value = $line.Substring($firstEquals + 1).Trim()
-        if ($value.StartsWith('"') -and $value.EndsWith('"') -and $value.Length -ge 2) {
-            $value = $value.Substring(1, $value.Length - 2)
-        } elseif ($value.StartsWith("'") -and $value.EndsWith("'") -and $value.Length -ge 2) {
-            $value = $value.Substring(1, $value.Length - 2)
+            $key = $line.Substring(0, $firstEquals).Trim()
+            if ($key.StartsWith("export ")) {
+                $key = $key.Substring(7).Trim()
+            }
+            if ([string]::IsNullOrWhiteSpace($key)) {
+                continue
+            }
+
+            $value = $line.Substring($firstEquals + 1).Trim()
+            if ($value.StartsWith('"') -and $value.EndsWith('"') -and $value.Length -ge 2) {
+                $value = $value.Substring(1, $value.Length - 2)
+            } elseif ($value.StartsWith("'") -and $value.EndsWith("'") -and $value.Length -ge 2) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+
+            $result[$key] = $value
         }
-        $result[$key] = $value
+    } finally {
+        if ($reader) {
+            $reader.Dispose()
+        }
     }
 
     return $result
@@ -235,9 +279,11 @@ function Get-ConfigValue {
         [string]$Key
     )
 
-    $fromFile = Get-OptionalProperty -InputObject $EnvMap -Name $Key
-    if (-not [string]::IsNullOrWhiteSpace([string]$fromFile)) {
-        return [string]$fromFile
+    if ($EnvMap -and $EnvMap.ContainsKey($Key)) {
+        $fromFile = [string]$EnvMap[$Key]
+        if (-not [string]::IsNullOrWhiteSpace($fromFile)) {
+            return $fromFile
+        }
     }
 
     $fromProcess = [System.Environment]::GetEnvironmentVariable($Key)
@@ -248,16 +294,50 @@ function Get-ConfigValue {
     return $null
 }
 
+function Save-EnvValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Key,
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+    $line = "$Key=$Value"
+    if (Test-Path -Path $Path -PathType Leaf) {
+        Add-Content -Path $Path -Value $line
+    } else {
+        Set-Content -Path $Path -Value $line
+    }
+}
+
+function Require-ConfigValue {
+    param(
+        [hashtable]$EnvMap,
+        [Parameter(Mandatory = $true)]
+        [string]$Key,
+        [string]$Prompt
+    )
+    $value = Get-ConfigValue -EnvMap $EnvMap -Key $Key
+    if (-not [string]::IsNullOrWhiteSpace($value)) {
+        return $value
+    }
+    if ([string]::IsNullOrWhiteSpace($Prompt)) {
+        $Prompt = $Key
+    }
+    $value = Read-Prompt -Message $Prompt
+    Save-EnvValue -Path $CredsFile -Key $Key -Value $value
+    $EnvMap[$Key] = $value
+    return $value
+}
+
 function Get-BasicHeaders {
     param(
         [hashtable]$EnvMap,
         [switch]$Json
     )
 
-    $apiKey = Get-ConfigValue -EnvMap $EnvMap -Key "CURSOR_API_KEY"
-    if ([string]::IsNullOrWhiteSpace($apiKey)) {
-        throw "Missing CURSOR_API_KEY (in creds file or process env)."
-    }
+    $apiKey = Require-ConfigValue -EnvMap $EnvMap -Key "CURSOR_API_KEY" -Prompt "Cursor API Key"
 
     $basic = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("$apiKey`:" ))
     $headers = @{
@@ -273,10 +353,7 @@ function Get-BasicHeaders {
 function Get-ScimHeaders {
     param([hashtable]$EnvMap)
 
-    $token = Get-ConfigValue -EnvMap $EnvMap -Key "CURSOR_SCIM_TOKEN"
-    if ([string]::IsNullOrWhiteSpace($token)) {
-        throw "Missing CURSOR_SCIM_TOKEN (required for regular groups / SCIM)."
-    }
+    $token = Require-ConfigValue -EnvMap $EnvMap -Key "CURSOR_SCIM_TOKEN" -Prompt "Cursor SCIM Token"
 
     return @{
         "Authorization" = "Bearer $token"
@@ -297,10 +374,12 @@ function Resolve-ScimBaseUrl {
         $candidate = Get-ConfigValue -EnvMap $EnvMap -Key "CURSOR_SCIM_BASE_URL"
     }
 
-    $resolved = Normalize-UrlBase -Url $candidate
-    if ([string]::IsNullOrWhiteSpace($resolved)) {
-        throw "Missing CURSOR_SCIM_BASE_URL (or pass --scim-base-url)."
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        $candidate = Read-Prompt -Message "Cursor SCIM Base URL"
+        Save-EnvValue -Path $CredsFile -Key "CURSOR_SCIM_BASE_URL" -Value $candidate
+        $EnvMap["CURSOR_SCIM_BASE_URL"] = $candidate
     }
+    $resolved = Normalize-UrlBase -Url $candidate
 
     $script:ScimBaseUrl = $resolved
     return $script:ScimBaseUrl
@@ -340,9 +419,10 @@ function Invoke-CursorRequest {
         }
 
         $statusCode = [int]$response.StatusCode
-        $stream = $response.GetResponseStream()
-        $reader = New-Object System.IO.StreamReader($stream)
-        $responseText = $reader.ReadToEnd()
+        $responseText = $_.ErrorDetails.Message
+        if ([string]::IsNullOrWhiteSpace($responseText)) {
+            $responseText = $response.ReasonPhrase
+        }
         throw "HTTP $statusCode calling $Method $Url`n$responseText"
     }
 }
@@ -394,7 +474,7 @@ function Get-AllScimResources {
     $startIndex = 1
 
     while ($true) {
-        $url = "$base/$ResourceType?count=$count&startIndex=$startIndex"
+        $url = "$base/${ResourceType}?count=$count&startIndex=$startIndex"
         $response = Invoke-CursorRequest -Method "GET" -Url $url -Headers $headers
         $resourcesRaw = Get-OptionalProperty -InputObject $response -Name "Resources"
         $resources = @()
@@ -861,7 +941,8 @@ try {
 
     if (-not $script:Command) {
         Show-Help
-        throw "No command provided."
+        Write-Host "──────────────────────────────────────────────────────────────"
+        $script:Command = Read-Prompt -Message "Command"
     }
 
     if ($script:Command -eq "help") {
@@ -869,19 +950,26 @@ try {
         exit 0
     }
 
+    if ([string]::IsNullOrWhiteSpace($GroupType)) {
+        $script:GroupType = Read-Prompt -Message "Group type (billing/regular)" -Default "billing"
+    }
     if ($GroupType -notin @("billing", "regular")) {
         throw "Unsupported --group-type '$GroupType'. Allowed: billing, regular."
     }
 
-    if ($script:Command -in @("list-members", "rename-group", "remove-group", "add-user", "remove-user")) {
+    if ($script:Command -in @("list-members", "rename-group", "remove-group", "add-user", "remove-user", "create-group")) {
         if ([string]::IsNullOrWhiteSpace($GroupId) -and [string]::IsNullOrWhiteSpace($GroupName)) {
-            throw "Provide either --group-id or --group-name."
+            $script:GroupName = Read-Prompt -Message "Group name"
         }
     }
-
+    if ($script:Command -eq "rename-group") {
+        if ([string]::IsNullOrWhiteSpace($NewName)) {
+            $script:NewName = Read-Prompt -Message "New name"
+        }
+    }
     if ($script:Command -in @("add-user", "remove-user")) {
         if ([string]::IsNullOrWhiteSpace($UserId) -and [string]::IsNullOrWhiteSpace($UserEmail)) {
-            throw "Provide either --user-id or --user-email."
+            $script:UserEmail = Read-Prompt -Message "User email"
         }
     }
 
@@ -904,6 +992,13 @@ try {
         default { throw "Unsupported command: $($script:Command)" }
     }
 } catch {
-    Write-Error $_.Exception.Message
+    $errorMessage = $_.ErrorDetails.Message
+    if ([string]::IsNullOrWhiteSpace($errorMessage)) {
+        $errorMessage = [string]$_
+    }
+    if ([string]::IsNullOrWhiteSpace($errorMessage)) {
+        $errorMessage = "Unexpected error. Run with --verbose-output for details."
+    }
+    Write-Host "[error] $errorMessage"
     exit 1
 }
