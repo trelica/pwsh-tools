@@ -644,6 +644,8 @@ function Create-ScimUsers {
         throw "Provide --user-email."
     }
 
+    Write-Host "Processing..."
+
     $headers = Get-ScimHeaders -EnvMap $EnvMap
     $base = Resolve-ScimBaseUrl -EnvMap $EnvMap
     $url = "$base/Users"
