@@ -15,6 +15,7 @@ $script:IncludeMembers = $false
 $script:VerboseOutput = $false
 $script:BillingCycle = $null
 $script:ScimBaseUrlOverride = $null
+$script:Interactive = $false
 
 function Parse-Arguments {
     param([string[]]$InputArgs)
@@ -1027,6 +1028,7 @@ try {
     Parse-Arguments -InputArgs $args
 
     if (-not $script:Command) {
+        $script:Interactive = $true
         Write-Host "Commands:"
         Write-Host "  list-users    (lu)"
         Write-Host "  list-groups   (lg)"
@@ -1038,6 +1040,7 @@ try {
         Write-Host "  remove-user   (ru)"
         Write-Host "  create-user   (cu)"
         Write-Host "  help          (h)"
+        Write-Host "  exit"
         $script:Command = Read-Prompt -Message "Command"
         $script:Command = $script:Command -replace '^--', ''
         $script:Command = switch -Regex ($script:Command) {
@@ -1051,6 +1054,7 @@ try {
             '^(au|add-user)$'                     { 'add-user' }
             '^(ru|remove-user)$'                  { 'remove-user' }
             '^(cu|create-user)$'                  { 'create-user' }
+            '^(q|quit|exit)$'                     { 'exit' }
             default                               { $script:Command }
         }
     }
@@ -1059,6 +1063,8 @@ try {
         Show-Help
         exit 0
     }
+
+    if ($script:Command -eq "exit") { exit 0 }
 
     if ($script:Command -ne "create-user") {
         if ([string]::IsNullOrWhiteSpace($GroupType)) {
@@ -1103,7 +1109,28 @@ try {
         "add-user" { Update-GroupMembership -EnvMap $envMap -Operation "add" }
         "remove-user" { Update-GroupMembership -EnvMap $envMap -Operation "remove" }
         "create-user" { Create-ScimUsers -EnvMap $envMap }
+        "exit" { exit 0 }
         default { throw "Unsupported command: $($script:Command)" }
+    }
+
+    if ($script:Interactive) {
+        $parts = @("pwsh ./cursor-group-ops.ps1")
+        $parts += "--$($script:Command)"
+        if ($script:Command -ne "create-user" -and -not [string]::IsNullOrWhiteSpace($script:GroupType)) {
+            $parts += "--group-type $($script:GroupType)"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($script:GroupId))   { $parts += "--group-id $($script:GroupId)" }
+        if (-not [string]::IsNullOrWhiteSpace($script:GroupName)) { $parts += "--group-name `"$($script:GroupName)`"" }
+        if (-not [string]::IsNullOrWhiteSpace($script:NewName))   { $parts += "--new-name `"$($script:NewName)`"" }
+        if ($script:UserEmails.Count -gt 0) { $parts += "--user-email `"$($script:UserEmails -join ',')`"" }
+        if ($script:UserIds.Count -gt 0)    { $parts += "--user-id `"$($script:UserIds -join ',')`"" }
+        if (-not [string]::IsNullOrWhiteSpace($script:BillingCycle))        { $parts += "--billing-cycle $($script:BillingCycle)" }
+        if (-not [string]::IsNullOrWhiteSpace($script:ScimBaseUrlOverride)) { $parts += "--scim-base-url $($script:ScimBaseUrlOverride)" }
+        if ($script:IncludeMembers) { $parts += "--include-members" }
+        if ($script:CredsFile -ne "./.env") { $parts += "--creds-file `"$($script:CredsFile)`"" }
+        Write-Host ""
+        Write-Host "CLI equivalent:"
+        Write-Host "  $($parts -join ' ')"
     }
 } catch {
     $errorMessage = $_.ErrorDetails?.Message
