@@ -1101,8 +1101,15 @@ try {
     }
     if ($script:Command -in @("add-user", "remove-user", "create-user")) {
         if ($script:UserIds.Count -eq 0 -and $script:UserEmails.Count -eq 0) {
-            $raw = Read-Prompt -Message "User email(s) (comma/tab/newline-separated)"
-            $script:UserEmails = @(@($raw -split '[,\t\r\n]+') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+            Write-Host -NoNewline -ForegroundColor Cyan "? "
+            Write-Host "User email(s) — paste from Excel or enter one per line, then blank line to finish:"
+            $lines = @()
+            while ($true) {
+                $line = Read-Host
+                if ([string]::IsNullOrWhiteSpace($line)) { break }
+                $lines += $line
+            }
+            $script:UserEmails = @($lines | ForEach-Object { $_ -split '[,\t]+' } | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
         }
     }
 
