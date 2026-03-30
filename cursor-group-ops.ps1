@@ -728,10 +728,18 @@ function List-Users {
 
     if (-not [string]::IsNullOrWhiteSpace($GroupId) -or -not [string]::IsNullOrWhiteSpace($GroupName)) {
         $group = Resolve-BillingGroup -EnvMap $EnvMap
-        $members = @(Get-OptionalProperty -InputObject $group -Name "currentMembers" -DefaultValue @())
-        Write-Info "Members in '$($group.name)': $($members.Count)"
+        $headers = Get-BasicHeaders -EnvMap $EnvMap
+        $url = "$($script:AdminBaseUrl)/teams/groups/$([System.Uri]::EscapeDataString($group.id))"
+        if (-not [string]::IsNullOrWhiteSpace($BillingCycle)) {
+            $url = "$url?billingCycle=$([System.Uri]::EscapeDataString($BillingCycle))"
+        }
+        $response = Invoke-CursorRequest -Method "GET" -Url $url -Headers $headers
+        $groupPayload = Get-OptionalProperty -InputObject $response -Name "group"
+        if (-not $groupPayload) { throw "Group payload missing from API response." }
+        $members = @(Get-OptionalProperty -InputObject $groupPayload -Name "currentMembers" -DefaultValue @())
+        Write-Info "Members in '$($groupPayload.name)': $($members.Count)"
         $members |
-            Select-Object @{Name = "id"; Expression = { [string]$_.userId } }, name, email, joinedAt |
+            Select-Object userId, name, email, joinedAt, spendCents |
             Sort-Object -Property email |
             Format-Table -AutoSize
         return
