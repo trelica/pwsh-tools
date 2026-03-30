@@ -1147,7 +1147,7 @@ try {
         Write-Host "  $($parts -join ' ')"
     }
 } catch {
-    $errorMessage = $_.ErrorDetails?.Message
+    $errorMessage = if ($_.ErrorDetails) { $_.ErrorDetails.Message } else { $null }
     if ([string]::IsNullOrWhiteSpace($errorMessage)) {
         $errorMessage = [string]$_
     }
