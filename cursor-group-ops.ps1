@@ -1027,7 +1027,17 @@ try {
     Parse-Arguments -InputArgs $args
 
     if (-not $script:Command) {
-        Write-Host "Commands: list-users (lu), list-groups (lg), list-members (lm), create-group (cg), rename-group (rg), remove-group (dg), add-user (au), remove-user (ru), create-user (cu), help (h)"
+        Write-Host "Commands:"
+        Write-Host "  list-users    (lu)"
+        Write-Host "  list-groups   (lg)"
+        Write-Host "  list-members  (lm)"
+        Write-Host "  create-group  (cg)"
+        Write-Host "  rename-group  (rg)"
+        Write-Host "  remove-group  (dg)"
+        Write-Host "  add-user      (au)"
+        Write-Host "  remove-user   (ru)"
+        Write-Host "  create-user   (cu)"
+        Write-Host "  help          (h)"
         $script:Command = Read-Prompt -Message "Command"
         $script:Command = $script:Command -replace '^--', ''
         $script:Command = switch -Regex ($script:Command) {
