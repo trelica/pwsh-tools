@@ -8,8 +8,8 @@ $script:GroupType = $null
 $script:GroupId = $null
 $script:GroupName = $null
 $script:NewName = $null
-$script:UserEmail = $null
-$script:UserId = $null
+$script:UserEmails = @()
+$script:UserIds = @()
 $script:CredsFile = "./.env"
 $script:IncludeMembers = $false
 $script:VerboseOutput = $false
@@ -61,12 +61,12 @@ function Parse-Arguments {
             }
             "^(--user-email|-UserEmail|-ue)$" {
                 if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
-                $script:UserEmail = $argsQueue.Dequeue()
+                $script:UserEmails += ($argsQueue.Dequeue() -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
                 continue
             }
             "^(--user-id|-UserId|-uid)$" {
                 if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
-                $script:UserId = $argsQueue.Dequeue()
+                $script:UserIds += ($argsQueue.Dequeue() -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
                 continue
             }
             "^(--billing-cycle|-BillingCycle|-bc)$" {
@@ -559,24 +559,27 @@ function Resolve-ScimGroup {
     return $nameMatches[0]
 }
 
-function Resolve-BillingUserId {
+function Resolve-BillingUserIds {
     param([hashtable]$EnvMap)
 
-    if (-not [string]::IsNullOrWhiteSpace($UserId)) {
-        return $UserId
+    if ($script:UserIds.Count -gt 0) {
+        return $script:UserIds | ForEach-Object { [string]$_ }
     }
 
-    Assert-RequiredArgument -Name "--user-email" -Value $UserEmail
+    if ($script:UserEmails.Count -eq 0) {
+        throw "Provide --user-email or --user-id."
+    }
+
     $members = Get-AllTeamMembers -EnvMap $EnvMap
-    $matches = @($members | Where-Object { $_.email -and $_.email.ToLowerInvariant() -eq $UserEmail.ToLowerInvariant() })
-    if ($matches.Count -eq 0) {
-        throw "No team member found with email '$UserEmail'."
+    $resolved = @()
+    foreach ($email in $script:UserEmails) {
+        $needle = $email.ToLowerInvariant()
+        $found = @($members | Where-Object { $_.email -and $_.email.ToLowerInvariant() -eq $needle })
+        if ($found.Count -eq 0) { throw "No team member found with email '$email'." }
+        if ($found.Count -gt 1) { throw "Multiple team members matched '$email'. Use --user-id." }
+        $resolved += [string]$found[0].id
     }
-    if ($matches.Count -gt 1) {
-        throw "Multiple team members matched '$UserEmail'. Use --user-id."
-    }
-
-    return [string]$matches[0].id
+    return $resolved
 }
 
 function Get-ScimUserEmail {
@@ -609,32 +612,27 @@ function Get-ScimUserEmail {
     return $null
 }
 
-function Resolve-ScimUserId {
+function Resolve-ScimUserIds {
     param([hashtable]$EnvMap)
 
-    if (-not [string]::IsNullOrWhiteSpace($UserId)) {
-        return $UserId
+    if ($script:UserIds.Count -gt 0) {
+        return $script:UserIds | ForEach-Object { [string]$_ }
     }
 
-    Assert-RequiredArgument -Name "--user-email" -Value $UserEmail
+    if ($script:UserEmails.Count -eq 0) {
+        throw "Provide --user-email or --user-id."
+    }
+
     $users = Get-AllScimUsers -EnvMap $EnvMap
-    $needle = $UserEmail.ToLowerInvariant()
-    $matches = @()
-    foreach ($user in $users) {
-        $email = Get-ScimUserEmail -ScimUser $user
-        if ($email -and $email.ToLowerInvariant() -eq $needle) {
-            $matches += $user
-        }
+    $resolved = @()
+    foreach ($email in $script:UserEmails) {
+        $needle = $email.ToLowerInvariant()
+        $found = @($users | Where-Object { (Get-ScimUserEmail -ScimUser $_) -and (Get-ScimUserEmail -ScimUser $_).ToLowerInvariant() -eq $needle })
+        if ($found.Count -eq 0) { throw "No SCIM user found with email '$email'." }
+        if ($found.Count -gt 1) { throw "Multiple SCIM users matched '$email'. Use --user-id." }
+        $resolved += [string]$found[0].id
     }
-
-    if ($matches.Count -eq 0) {
-        throw "No SCIM user found with email '$UserEmail'."
-    }
-    if ($matches.Count -gt 1) {
-        throw "Multiple SCIM users matched '$UserEmail'. Use --user-id."
-    }
-
-    return [string]$matches[0].id
+    return $resolved
 }
 
 function List-Users {
@@ -901,7 +899,7 @@ function Update-GroupMembership {
 
     if ($GroupType -eq "regular") {
         $group = Resolve-ScimGroup -EnvMap $EnvMap
-        $targetUserId = Resolve-ScimUserId -EnvMap $EnvMap
+        $targetUserIds = @(Resolve-ScimUserIds -EnvMap $EnvMap)
         $headers = Get-ScimHeaders -EnvMap $EnvMap
         $base = Resolve-ScimBaseUrl -EnvMap $EnvMap
         $url = "$base/Groups/$([System.Uri]::EscapeDataString($group.id))"
@@ -911,21 +909,21 @@ function Update-GroupMembership {
                 @{
                     op = $Operation
                     path = "members"
-                    value = @(@{ value = $targetUserId })
+                    value = @($targetUserIds | ForEach-Object { @{ value = $_ } })
                 }
             )
         }
 
         Invoke-CursorRequest -Method "PATCH" -Url $url -Headers $headers -Body $body | Out-Null
-        Write-Info "$Operation user '$targetUserId' in SCIM group '$($group.displayName)' (ID $($group.id))."
+        Write-Info "$Operation $($targetUserIds.Count) user(s) in SCIM group '$($group.displayName)' (ID $($group.id))."
         return
     }
 
     $group = Resolve-BillingGroup -EnvMap $EnvMap
-    $targetUserId = Resolve-BillingUserId -EnvMap $EnvMap
+    $targetUserIds = @(Resolve-BillingUserIds -EnvMap $EnvMap)
     $headers = Get-BasicHeaders -EnvMap $EnvMap -Json
     $url = "$($script:AdminBaseUrl)/teams/groups/$([System.Uri]::EscapeDataString($group.id))/members"
-    $body = @{ userIds = @([string]$targetUserId) }
+    $body = @{ userIds = @($targetUserIds | ForEach-Object { [string]$_ }) }
 
     if ($Operation -eq "add") {
         Invoke-CursorRequest -Method "POST" -Url $url -Headers $headers -Body $body | Out-Null
@@ -933,7 +931,7 @@ function Update-GroupMembership {
         Invoke-CursorRequest -Method "DELETE" -Url $url -Headers $headers -Body $body | Out-Null
     }
 
-    Write-Info "$Operation user '$targetUserId' in billing group '$($group.name)' (ID $($group.id))."
+    Write-Info "$Operation $($targetUserIds.Count) user(s) in billing group '$($group.name)' (ID $($group.id))."
 }
 
 try {
@@ -981,8 +979,9 @@ try {
         }
     }
     if ($script:Command -in @("add-user", "remove-user")) {
-        if ([string]::IsNullOrWhiteSpace($UserId) -and [string]::IsNullOrWhiteSpace($UserEmail)) {
-            $script:UserEmail = Read-Prompt -Message "User email"
+        if ($script:UserIds.Count -eq 0 -and $script:UserEmails.Count -eq 0) {
+            $raw = Read-Prompt -Message "User email(s) (comma-separated)"
+            $script:UserEmails = @($raw -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
         }
     }
 
