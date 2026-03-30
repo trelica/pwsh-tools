@@ -36,6 +36,7 @@ function Parse-Arguments {
             "^(--remove-group|-RemoveGroup|-dg)$" { $script:Command = "remove-group"; continue }
             "^(--add-user|-AddUser|-au)$" { $script:Command = "add-user"; continue }
             "^(--remove-user|-RemoveUser|-ru)$" { $script:Command = "remove-user"; continue }
+            "^(--create-user|-CreateUser|-cu)$" { $script:Command = "create-user"; continue }
             "^(--list-users|-ListUsers|-lu)$" { $script:Command = "list-users"; continue }
             "^(--include-members|-IncludeMembers|-im)$" { $script:IncludeMembers = $true; continue }
             "^(--verbose-output|-VerboseOutput|-v)$" { $script:VerboseOutput = $true; continue }
@@ -105,6 +106,7 @@ Commands (choose one):
   --remove-group | -dg --group-id <id> | --group-name <name>
   --add-user | -au (--group-id <id> | --group-name <name>) (--user-email <email> | --user-id <id>)
   --remove-user | -ru (--group-id <id> | --group-name <name>) (--user-email <email> | --user-id <id>)
+  --create-user | -cu --user-email <email>                    (SCIM only; looks up name from billing API)
 
 Common options:
   --group-type <billing|regular> | -gt <billing|regular>     (default: billing)
@@ -635,6 +637,46 @@ function Resolve-ScimUserIds {
     return $resolved
 }
 
+function Create-ScimUsers {
+    param([hashtable]$EnvMap)
+
+    if ($script:UserEmails.Count -eq 0) {
+        throw "Provide --user-email."
+    }
+
+    $headers = Get-ScimHeaders -EnvMap $EnvMap
+    $base = Resolve-ScimBaseUrl -EnvMap $EnvMap
+    $url = "$base/Users"
+
+    # Fetch billing members once to look up display names
+    $members = @(Get-AllTeamMembers -EnvMap $EnvMap)
+
+    foreach ($email in $script:UserEmails) {
+        $needle = $email.ToLowerInvariant()
+        $member = $members | Where-Object { $_.email -and $_.email.ToLowerInvariant() -eq $needle } | Select-Object -First 1
+
+        $givenName = $email
+        $familyName = ""
+        if ($member -and -not [string]::IsNullOrWhiteSpace([string]$member.name)) {
+            $parts = ([string]$member.name).Trim() -split '\s+', 2
+            $givenName = $parts[0]
+            $familyName = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+        }
+
+        $body = @{
+            schemas     = @("urn:ietf:params:scim:schemas:core:2.0:User")
+            userName    = $email
+            active      = $true
+            name        = @{ givenName = $givenName; familyName = $familyName }
+            emails      = @(@{ value = $email; primary = $true })
+        }
+
+        $result = Invoke-CursorRequest -Method "POST" -Url $url -Headers $headers -Body $body
+        $createdId = Get-OptionalProperty -InputObject $result -Name "id"
+        Write-Info "Created SCIM user '$email' (ID $createdId)."
+    }
+}
+
 function List-Users {
     param([hashtable]$EnvMap)
 
@@ -952,6 +994,7 @@ try {
             '^(dg|remove-group)$'                 { 'remove-group' }
             '^(au|add-user)$'                     { 'add-user' }
             '^(ru|remove-user)$'                  { 'remove-user' }
+            '^(cu|create-user)$'                  { 'create-user' }
             default                               { $script:Command }
         }
     }
@@ -961,11 +1004,13 @@ try {
         exit 0
     }
 
-    if ([string]::IsNullOrWhiteSpace($GroupType)) {
-        $script:GroupType = Read-Prompt -Message "Group type (billing/regular)" -Default "billing"
-    }
-    if ($GroupType -notin @("billing", "regular")) {
-        throw "Unsupported --group-type '$GroupType'. Allowed: billing, regular."
+    if ($script:Command -ne "create-user") {
+        if ([string]::IsNullOrWhiteSpace($GroupType)) {
+            $script:GroupType = Read-Prompt -Message "Group type (billing/regular)" -Default "billing"
+        }
+        if ($GroupType -notin @("billing", "regular")) {
+            throw "Unsupported --group-type '$GroupType'. Allowed: billing, regular."
+        }
     }
 
     if ($script:Command -in @("list-members", "rename-group", "remove-group", "add-user", "remove-user", "create-group")) {
@@ -978,7 +1023,7 @@ try {
             $script:NewName = Read-Prompt -Message "New name"
         }
     }
-    if ($script:Command -in @("add-user", "remove-user")) {
+    if ($script:Command -in @("add-user", "remove-user", "create-user")) {
         if ($script:UserIds.Count -eq 0 -and $script:UserEmails.Count -eq 0) {
             $raw = Read-Prompt -Message "User email(s) (comma-separated)"
             $script:UserEmails = @($raw -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
@@ -1001,6 +1046,7 @@ try {
         "remove-group" { Remove-Group -EnvMap $envMap }
         "add-user" { Update-GroupMembership -EnvMap $envMap -Operation "add" }
         "remove-user" { Update-GroupMembership -EnvMap $envMap -Operation "remove" }
+        "create-user" { Create-ScimUsers -EnvMap $envMap }
         default { throw "Unsupported command: $($script:Command)" }
     }
 } catch {
