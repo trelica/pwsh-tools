@@ -1032,7 +1032,7 @@ try {
         }
     }
 
-    if ($script:Command -in @("list-members", "rename-group", "remove-group", "add-user", "remove-user", "create-group")) {
+    if ($script:Command -in @("list-members", "rename-group", "remove-group", "add-user", "remove-user", "create-group", "create-user")) {
         if ([string]::IsNullOrWhiteSpace($GroupId) -and [string]::IsNullOrWhiteSpace($GroupName)) {
             $script:GroupName = Read-Prompt -Message "Group name"
         }
