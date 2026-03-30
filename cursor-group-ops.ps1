@@ -1101,8 +1101,8 @@ try {
     }
     if ($script:Command -in @("add-user", "remove-user", "create-user")) {
         if ($script:UserIds.Count -eq 0 -and $script:UserEmails.Count -eq 0) {
-            $raw = Read-Prompt -Message "User email(s) (comma-separated)"
-            $script:UserEmails = @(@($raw -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+            $raw = Read-Prompt -Message "User email(s) (comma/tab/newline-separated)"
+            $script:UserEmails = @(@($raw -split '[,\t\r\n]+') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
         }
     }
 
