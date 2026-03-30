@@ -683,11 +683,17 @@ function Create-ScimUsers {
             emails      = @(@{ value = $email; primary = $true })
         }
 
-        $result = Invoke-CursorRequest -Method "POST" -Url $url -Headers $headers -Body $body
-        $createdId = Get-OptionalProperty -InputObject $result -Name "id"
-        Write-Info "Created SCIM user '$email' (ID $createdId)."
-        $createdIds += [string]$createdId
+        try {
+            $result = Invoke-CursorRequest -Method "POST" -Url $url -Headers $headers -Body $body
+            $createdId = Get-OptionalProperty -InputObject $result -Name "id"
+            Write-Info "Created SCIM user '$email' (ID $createdId)."
+            $createdIds += [string]$createdId
+        } catch {
+            Write-Host "[error] $($email): $_"
+        }
     }
+
+    if ($createdIds.Count -eq 0) { return }
 
     if (-not [string]::IsNullOrWhiteSpace($GroupId) -or -not [string]::IsNullOrWhiteSpace($GroupName)) {
         $group = Resolve-ScimGroup -EnvMap $EnvMap
@@ -1096,7 +1102,7 @@ try {
     if ($script:Command -in @("add-user", "remove-user", "create-user")) {
         if ($script:UserIds.Count -eq 0 -and $script:UserEmails.Count -eq 0) {
             $raw = Read-Prompt -Message "User email(s) (comma-separated)"
-            $script:UserEmails = @($raw -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+            $script:UserEmails = @(@($raw -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
         }
     }
 
