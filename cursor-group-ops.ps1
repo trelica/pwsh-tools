@@ -306,12 +306,20 @@ function Save-EnvValue {
         [Parameter(Mandatory = $true)]
         [string]$Value
     )
-    $line = "$Key=$Value"
-    if (Test-Path -Path $Path -PathType Leaf) {
-        Add-Content -Path $Path -Value $line
-    } else {
-        Set-Content -Path $Path -Value $line
+    # [System.IO.File]::Exists returns false for FIFOs/pipes — only true for regular files.
+    # If the path exists but isn't a regular file, fall back to ./.env so we don't write to a pipe.
+    $savePath = $Path
+    if ((Test-Path -Path $Path) -and -not [System.IO.File]::Exists($Path)) {
+        $savePath = "./.env"
+        Write-VerboseInfo "Creds file '$Path' is not a regular file; saving '$Key' to '$savePath'."
     }
+    $line = "$Key=$Value"
+    if ([System.IO.File]::Exists($savePath)) {
+        Add-Content -Path $savePath -Value $line
+    } else {
+        Set-Content -Path $savePath -Value $line
+    }
+    Write-VerboseInfo "Saved $Key to '$savePath'."
 }
 
 function Require-ConfigValue {
