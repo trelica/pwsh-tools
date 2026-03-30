@@ -12,8 +12,9 @@ $script:GroupId = $null
 $script:GroupName = $null
 $script:NewName = $null
 $script:Description = $null
-$script:UserEmail = $null
-$script:UserId = $null
+$script:UserEmails = @()
+$script:UserIds = @()
+$script:Interactive = $false
 $script:TeamId = $null
 $script:TeamName = $null
 $script:CredsFile = "./.env"
@@ -66,12 +67,12 @@ function Parse-Arguments {
             }
             "^(--user-email|-UserEmail|-ue)$" {
                 if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
-                $script:UserEmail = $argsQueue.Dequeue()
+                $script:UserEmails += ($argsQueue.Dequeue() -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
                 continue
             }
             "^(--user-id|-UserId|-uid)$" {
                 if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
-                $script:UserId = $argsQueue.Dequeue()
+                $script:UserIds += ($argsQueue.Dequeue() -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
                 continue
             }
             "^(--team-id|-TeamId|-tid)$" {
@@ -150,7 +151,7 @@ function Read-Prompt {
         Write-Host -NoNewline -ForegroundColor Cyan "? "
         Write-Host -NoNewline "$Message`: "
     }
-    $value = [Console]::ReadLine()
+    $value = Read-Host
     if ([string]::IsNullOrWhiteSpace($value)) {
         if (-not [string]::IsNullOrWhiteSpace($Default)) {
             return $Default
@@ -851,33 +852,47 @@ function Update-GroupMembership {
     )
 
     $group = Resolve-GroupIds -EnvMap $EnvMap -RequireScim
-    $targetUserId = $null
-    $targetUserLabel = $null
-    if (-not [string]::IsNullOrWhiteSpace($UserId)) {
-        $targetUserId = $UserId
-        $targetUserLabel = $UserId
-    } else {
-        Assert-RequiredArgument -Name "--user-email" -Value $UserEmail
-        $user = Get-UserByEmail -EnvMap $EnvMap -Email $UserEmail
-        $targetUserId = $user.id
-        $targetUserLabel = Get-OptionalProperty -InputObject $user -Name "email" -DefaultValue $UserEmail
+
+    if ($script:UserIds.Count -eq 0 -and $script:UserEmails.Count -eq 0) {
+        throw "Provide --user-email or --user-id."
     }
+
+    $targets = @()
+    foreach ($uid in $script:UserIds) {
+        $targets += [PSCustomObject]@{ Id = $uid; Label = $uid }
+    }
+    foreach ($email in $script:UserEmails) {
+        try {
+            $user = Get-UserByEmail -EnvMap $EnvMap -Email $email
+            $targets += [PSCustomObject]@{ Id = $user.id; Label = (Get-OptionalProperty -InputObject $user -Name "email" -DefaultValue $email) }
+        } catch {
+            Write-Host "[error] $($email): $_"
+        }
+    }
+
+    if ($targets.Count -eq 0) { return }
 
     $headers = Get-ScimHeaders -EnvMap $EnvMap
     $url = "$($script:ScimBaseUrl)/Groups/$([System.Uri]::EscapeDataString($group.ScimId))"
-    $body = @{
-        schemas    = @("urn:ietf:params:scim:api:messages:2.0:PatchOp")
-        Operations = @(
-            @{
-                op    = $Operation
-                path  = "members"
-                value = @(@{ value = $targetUserId })
-            }
-        )
-    }
 
-    Invoke-CanvaRequest -Method "PATCH" -Url $url -Headers $headers -Body $body | Out-Null
-    Write-Info "$Operation user '$targetUserLabel' (id=$targetUserId) in group '$($group.Name)' (scimId=$($group.ScimId))."
+    foreach ($target in $targets) {
+        $body = @{
+            schemas    = @("urn:ietf:params:scim:api:messages:2.0:PatchOp")
+            Operations = @(
+                @{
+                    op    = $Operation
+                    path  = "members"
+                    value = @(@{ value = $target.Id })
+                }
+            )
+        }
+        try {
+            Invoke-CanvaRequest -Method "PATCH" -Url $url -Headers $headers -Body $body | Out-Null
+            Write-Info "$Operation user '$($target.Label)' (id=$($target.Id)) in group '$($group.Name)' (scimId=$($group.ScimId))."
+        } catch {
+            Write-Host "[error] $($target.Label): $_"
+        }
+    }
 }
 
 function List-Users {
@@ -913,10 +928,37 @@ try {
     Parse-Arguments -InputArgs $args
 
     if (-not $script:Command) {
-        Show-Help
-        Write-Host "──────────────────────────────────────────────────────────────"
+        $script:Interactive = $true
+        Write-Host "Commands:"
+        Write-Host "  list-groups   (lg)"
+        Write-Host "  list-members  (lm)"
+        Write-Host "  list-users    (lu)"
+        Write-Host "  list-teams    (lt)"
+        Write-Host "  create-group  (cg)"
+        Write-Host "  rename-group  (rg)"
+        Write-Host "  remove-group  (dg)"
+        Write-Host "  add-user      (au)"
+        Write-Host "  remove-user   (ru)"
+        Write-Host "  help          (h)"
+        Write-Host "  exit"
         $script:Command = Read-Prompt -Message "Command"
+        $script:Command = switch -Regex ($script:Command.ToLowerInvariant()) {
+            '^(lg|list-groups)$'   { 'list-groups' }
+            '^(lm|list-members)$'  { 'list-members' }
+            '^(lu|list-users)$'    { 'list-users' }
+            '^(lt|list-teams)$'    { 'list-teams' }
+            '^(cg|create-group)$'  { 'create-group' }
+            '^(rg|rename-group)$'  { 'rename-group' }
+            '^(dg|remove-group)$'  { 'remove-group' }
+            '^(au|add-user)$'      { 'add-user' }
+            '^(ru|remove-user)$'   { 'remove-user' }
+            '^(h|help)$'           { 'help' }
+            '^(q|quit|exit)$'      { 'exit' }
+            default                { $script:Command }
+        }
     }
+
+    if ($script:Command -eq "exit") { exit 0 }
 
     if ($script:Command -eq "help") {
         Show-Help
@@ -934,8 +976,16 @@ try {
         }
     }
     if ($script:Command -in @("add-user", "remove-user")) {
-        if ([string]::IsNullOrWhiteSpace($UserEmail) -and [string]::IsNullOrWhiteSpace($UserId)) {
-            $script:UserEmail = Read-Prompt -Message "User email"
+        if ($script:UserIds.Count -eq 0 -and $script:UserEmails.Count -eq 0) {
+            Write-Host -NoNewline -ForegroundColor Cyan "? "
+            Write-Host "User email(s) — paste from Excel or enter one per line, then blank line to finish:"
+            $lines = @()
+            while ($true) {
+                $line = Read-Host
+                if ([string]::IsNullOrWhiteSpace($line)) { break }
+                $lines += $line
+            }
+            $script:UserEmails = @($lines | ForEach-Object { $_ -split '[,\t]+' } | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
         }
     }
 
@@ -962,8 +1012,24 @@ try {
         "list-teams" { List-Teams -EnvMap $envMap }
         default { throw "Unsupported command: $($script:Command)" }
     }
+
+    if ($script:Interactive) {
+        $parts = @("pwsh ./canva-group-ops.ps1")
+        $parts += "--$($script:Command)"
+        if (-not [string]::IsNullOrWhiteSpace($script:GroupId))      { $parts += "--group-id $($script:GroupId)" }
+        if (-not [string]::IsNullOrWhiteSpace($script:GroupName))    { $parts += "--group-name `"$($script:GroupName)`"" }
+        if (-not [string]::IsNullOrWhiteSpace($script:NewName))      { $parts += "--new-name `"$($script:NewName)`"" }
+        if (-not [string]::IsNullOrWhiteSpace($script:Description))  { $parts += "--description `"$($script:Description)`"" }
+        if ($script:UserEmails.Count -gt 0) { $parts += "--user-email `"$($script:UserEmails -join ',')`"" }
+        if ($script:UserIds.Count -gt 0)    { $parts += "--user-id `"$($script:UserIds -join ',')`"" }
+        if (-not [string]::IsNullOrWhiteSpace($script:TeamId))       { $parts += "--team-id $($script:TeamId)" }
+        if (-not [string]::IsNullOrWhiteSpace($script:TeamName))     { $parts += "--team-name `"$($script:TeamName)`"" }
+        if ($script:IncludeMembers) { $parts += "--include-members" }
+        Write-Host ""
+        Write-Host "CLI equivalent: $($parts -join ' ')"
+    }
 } catch {
-    $errorMessage = $_.ErrorDetails.Message
+    $errorMessage = if ($_.ErrorDetails) { $_.ErrorDetails.Message } else { $null }
     if ([string]::IsNullOrWhiteSpace($errorMessage)) {
         $errorMessage = [string]$_
     }
