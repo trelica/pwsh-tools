@@ -164,7 +164,7 @@ function Read-Prompt {
         Write-Host -NoNewline -ForegroundColor Cyan "? "
         Write-Host -NoNewline "$Message`: "
     }
-    $value = [Console]::ReadLine()
+    $value = Read-Host
     if ([string]::IsNullOrWhiteSpace($value)) {
         if (-not [string]::IsNullOrWhiteSpace($Default)) {
             return $Default
