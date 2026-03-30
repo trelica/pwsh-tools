@@ -1027,8 +1027,7 @@ try {
     Parse-Arguments -InputArgs $args
 
     if (-not $script:Command) {
-        Show-Help
-        Write-Host "──────────────────────────────────────────────────────────────"
+        Write-Host "Commands: list-users (lu), list-groups (lg), list-members (lm), create-group (cg), rename-group (rg), remove-group (dg), add-user (au), remove-user (ru), create-user (cu), help (h)"
         $script:Command = Read-Prompt -Message "Command"
         $script:Command = $script:Command -replace '^--', ''
         $script:Command = switch -Regex ($script:Command) {
