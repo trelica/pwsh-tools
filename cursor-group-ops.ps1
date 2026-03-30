@@ -703,7 +703,15 @@ function List-Users {
 
     if ($GroupType -eq "regular") {
         $users = Get-AllScimUsers -EnvMap $EnvMap
-        Write-Info "SCIM users: $($users.Count)"
+        if (-not [string]::IsNullOrWhiteSpace($GroupId) -or -not [string]::IsNullOrWhiteSpace($GroupName)) {
+            $group = Resolve-ScimGroup -EnvMap $EnvMap
+            $memberIds = @(Get-OptionalProperty -InputObject $group -Name "members" -DefaultValue @()) |
+                ForEach-Object { [string]$_.value }
+            $users = @($users | Where-Object { $memberIds -contains [string](Get-OptionalProperty -InputObject $_ -Name "id") })
+            Write-Info "SCIM users in '$($group.displayName)': $($users.Count)"
+        } else {
+            Write-Info "SCIM users: $($users.Count)"
+        }
         $rows = @()
         foreach ($u in $users) {
             $rows += [PSCustomObject]@{
@@ -714,8 +722,18 @@ function List-Users {
                 displayName = [string](Get-OptionalProperty -InputObject $u -Name "displayName")
             }
         }
-
         $rows | Sort-Object -Property email, userName | Format-Table -AutoSize
+        return
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($GroupId) -or -not [string]::IsNullOrWhiteSpace($GroupName)) {
+        $group = Resolve-BillingGroup -EnvMap $EnvMap
+        $members = @(Get-OptionalProperty -InputObject $group -Name "currentMembers" -DefaultValue @())
+        Write-Info "Members in '$($group.name)': $($members.Count)"
+        $members |
+            Select-Object @{Name = "id"; Expression = { [string]$_.userId } }, name, email, joinedAt |
+            Sort-Object -Property email |
+            Format-Table -AutoSize
         return
     }
 
