@@ -50,127 +50,117 @@ CANVA_SCIM_TOKEN=xxx
 
 ## Cursor Group Ops
 
-Script path:
+Manages Cursor billing groups (Admin API) and regular/SCIM groups. Supports two group types:
 
-- `cursor-group-ops.ps1`
-
-Supports two group types:
-
-- `billing` (Cursor Admin API `/teams/groups`)
-- `regular` (SCIM groups via `CURSOR_SCIM_BASE_URL`, WorkOS-backed)
+- `billing` — Cursor Admin API billing groups
+- `regular` — SCIM groups (WorkOS-backed, via `CURSOR_SCIM_BASE_URL`)
 
 ### Requirements
 
-- PowerShell 7+ (`pwsh`)
+- PowerShell 5.1 or later (`powershell` or `pwsh`)
 - Credentials in `./.env` (default) or pass `--creds-file`
 
-Expected keys:
+### Step-by-step (interactive) mode
 
-- `CURSOR_API_KEY` (required for billing groups + team member endpoints)
-- `CURSOR_SCIM_TOKEN` (required for regular/SCIM groups)
-- `CURSOR_SCIM_BASE_URL` (required for regular/SCIM groups)
+The easiest way to use the script is to run it with no arguments. It will prompt you for everything:
 
-### Commands
-
-Long flags:
-
-- `--help`
-- `--list-users`
-- `--list-groups`
-- `--list-members`
-- `--create-group`
-- `--rename-group`
-- `--remove-group`
-- `--add-user`
-- `--remove-user`
-
-Short aliases:
-
-- `-h` help
-- `-lu` list users
-- `-lg` list groups
-- `-lm` list members
-- `-cg` create group
-- `-rg` rename group
-- `-dg` delete group
-- `-au` add user
-- `-ru` remove user
-
-Common options:
-
-- `--group-type` / `-gt` (`billing` or `regular`; default `billing`)
-- `--group-id` / `-gid`
-- `--group-name` / `-gn`
-- `--new-name` / `-nn`
-- `--user-email` / `-ue`
-- `--user-id` / `-uid`
-- `--billing-cycle` / `-bc` (`YYYY-MM-DD`, billing only)
-- `--scim-base-url` / `-sbu` (override SCIM base URL)
-- `--creds-file` / `-cf` (default: `./.env`)
-- `--include-members` / `-im`
-- `--verbose-output` / `-v`
-
-### Examples
-
-Help:
-
-```bash
-pwsh ./cursor-group-ops.ps1 --help
+```powershell
+pwsh ./cursor-group-ops.ps1
 ```
 
-List billing groups:
+You'll be asked to choose a command, then prompted for any required inputs:
 
-```bash
-pwsh ./cursor-group-ops.ps1 -lg -gt billing
+```
+Commands:
+  list-groups   (lg)
+  list-members  (lm)
+  list-users    (lu)
+  create-group  (cg)
+  rename-group  (rg)
+  remove-group  (dg)
+  add-user      (au)
+  remove-user   (ru)
+  create-user   (cu)
+  help          (h)
+  exit
+
+? Command: add-user
+? Group type (billing/regular) [billing]:
+? Group name: Engineering
+? User email(s) — paste from Excel or enter one per line, then blank line to finish:
+user@company.com
+
+[info] Added user@company.com to billing group 'Engineering'.
 ```
 
-List billing groups with members:
+**Tip:** when entering emails, you can paste a column copied from Excel — each row is treated as a separate email. Finish with a blank line.
 
-```bash
-pwsh ./cursor-group-ops.ps1 -lg -gt billing -im
+After each run, the script prints the equivalent CLI command:
+
+```
+CLI equivalent: pwsh ./cursor-group-ops.ps1 --add-user --group-type billing --group-name "Engineering" --user-email "user@company.com"
 ```
 
-Create/rename/delete billing group:
+This makes it easy to learn the CLI flags or build automations from actions you've already done interactively.
 
-```bash
-pwsh ./cursor-group-ops.ps1 -cg -gt billing -gn "Platform"
-pwsh ./cursor-group-ops.ps1 -rg -gt billing -gn "Platform" -nn "Platform Engineering"
-pwsh ./cursor-group-ops.ps1 -dg -gt billing -gn "Platform Engineering"
-```
+### CLI mode
 
-Add/remove billing member by email:
+Pass flags directly to skip the prompts. Useful for scripting or when you already know what you want.
 
-```bash
-pwsh ./cursor-group-ops.ps1 -au -gt billing -gn "Engineering" -ue "user@company.com"
-pwsh ./cursor-group-ops.ps1 -ru -gt billing -gn "Engineering" -ue "user@company.com"
-```
+**Group type** (`--group-type` / `-gt`): `billing` (default) or `regular`
 
-List SCIM regular groups:
+Common operations:
 
-```bash
+```powershell
+# List groups
+pwsh ./cursor-group-ops.ps1 -lg
 pwsh ./cursor-group-ops.ps1 -lg -gt regular
+pwsh ./cursor-group-ops.ps1 -lg -im          # include members
+
+# Add / remove a user from a group
+pwsh ./cursor-group-ops.ps1 -au -gn "Engineering" -ue "user@company.com"
+pwsh ./cursor-group-ops.ps1 -ru -gn "Engineering" -ue "user@company.com"
+
+# Create a SCIM user and add to a group in one step
+pwsh ./cursor-group-ops.ps1 --create-user -gn "Engineering" -ue "user@company.com"
+
+# Create / rename / delete a group
+pwsh ./cursor-group-ops.ps1 -cg -gn "Platform"
+pwsh ./cursor-group-ops.ps1 -rg -gn "Platform" -nn "Platform Engineering"
+pwsh ./cursor-group-ops.ps1 -dg -gn "Platform Engineering"
 ```
 
-Create/rename/delete SCIM regular group:
+#### All flags
 
-```bash
-pwsh ./cursor-group-ops.ps1 -cg -gt regular -gn "Okta Engineering"
-pwsh ./cursor-group-ops.ps1 -rg -gt regular -gn "Okta Engineering" -nn "Okta Platform"
-pwsh ./cursor-group-ops.ps1 -dg -gt regular -gn "Okta Platform"
-```
-
-Add/remove SCIM member by email:
-
-```bash
-pwsh ./cursor-group-ops.ps1 -au -gt regular -gn "Okta Engineering" -ue "user@company.com"
-pwsh ./cursor-group-ops.ps1 -ru -gt regular -gn "Okta Engineering" -ue "user@company.com"
-```
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--help` | `-h` | Show help |
+| `--list-groups` | `-lg` | List groups |
+| `--list-members` | `-lm` | List members of a group |
+| `--list-users` | `-lu` | List SCIM users |
+| `--create-group` | `-cg` | Create a group |
+| `--rename-group` | `-rg` | Rename a group |
+| `--remove-group` | `-dg` | Delete a group |
+| `--add-user` | `-au` | Add user to group |
+| `--remove-user` | `-ru` | Remove user from group |
+| `--create-user` | `-cu` | Create SCIM user (optionally add to group) |
+| `--group-type` | `-gt` | `billing` or `regular` (default: `billing`) |
+| `--group-id` | `-gid` | Group ID |
+| `--group-name` | `-gn` | Group name |
+| `--new-name` | `-nn` | New name (for rename) |
+| `--user-email` | `-ue` | User email(s), comma-separated |
+| `--user-id` | `-uid` | User ID(s), comma-separated |
+| `--billing-cycle` | `-bc` | Billing cycle date `YYYY-MM-DD` |
+| `--scim-base-url` | `-sbu` | Override SCIM base URL |
+| `--creds-file` | `-cf` | Credentials file (default: `./.env`) |
+| `--include-members` | `-im` | Include members in group listings |
+| `--verbose-output` | `-v` | Verbose HTTP output |
 
 ### Notes
 
-- Cursor Admin API group endpoints are for **billing groups**.
-- Regular groups are handled through SCIM and are typically IdP-managed.
-- Billing groups attached to directory sync (`directoryGroupId`) cannot be modified through billing group member APIs.
+- Billing groups attached to directory sync (`directoryGroupId`) cannot have members managed via the Admin API.
+- Regular groups are SCIM-managed and typically IdP-synced.
+- `--create-user` is SCIM only (`-gt regular`).
 
 ### References
 
