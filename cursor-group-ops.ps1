@@ -106,7 +106,7 @@ Commands (choose one):
   --remove-group | -dg --group-id <id> | --group-name <name>
   --add-user | -au (--group-id <id> | --group-name <name>) (--user-email <email> | --user-id <id>)
   --remove-user | -ru (--group-id <id> | --group-name <name>) (--user-email <email> | --user-id <id>)
-  --create-user | -cu --user-email <email>                    (SCIM only; looks up name from billing API)
+  --create-user | -cu --user-email <email> [--group-id <id> | --group-name <name>]  (SCIM only)
 
 Common options:
   --group-type <billing|regular> | -gt <billing|regular>     (default: billing)
@@ -647,6 +647,7 @@ function Create-ScimUsers {
     $headers = Get-ScimHeaders -EnvMap $EnvMap
     $base = Resolve-ScimBaseUrl -EnvMap $EnvMap
     $url = "$base/Users"
+    $createdIds = @()
 
     # Fetch billing members once to look up display names
     $members = @(Get-AllTeamMembers -EnvMap $EnvMap)
@@ -674,6 +675,24 @@ function Create-ScimUsers {
         $result = Invoke-CursorRequest -Method "POST" -Url $url -Headers $headers -Body $body
         $createdId = Get-OptionalProperty -InputObject $result -Name "id"
         Write-Info "Created SCIM user '$email' (ID $createdId)."
+        $createdIds += [string]$createdId
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($GroupId) -or -not [string]::IsNullOrWhiteSpace($GroupName)) {
+        $group = Resolve-ScimGroup -EnvMap $EnvMap
+        $groupUrl = "$base/Groups/$([System.Uri]::EscapeDataString($group.id))"
+        $groupBody = @{
+            schemas    = @("urn:ietf:params:scim:api:messages:2.0:PatchOp")
+            Operations = @(
+                @{
+                    op    = "add"
+                    path  = "members"
+                    value = @($createdIds | ForEach-Object { @{ value = $_ } })
+                }
+            )
+        }
+        Invoke-CursorRequest -Method "PATCH" -Url $groupUrl -Headers $headers -Body $groupBody | Out-Null
+        Write-Info "Added $($createdIds.Count) user(s) to SCIM group '$($group.displayName)' (ID $($group.id))."
     }
 }
 
