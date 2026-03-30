@@ -943,6 +943,19 @@ try {
         Show-Help
         Write-Host "──────────────────────────────────────────────────────────────"
         $script:Command = Read-Prompt -Message "Command"
+        $script:Command = $script:Command -replace '^--', ''
+        $script:Command = switch -Regex ($script:Command) {
+            '^(h|help)$'                          { 'help' }
+            '^(lg|list-groups)$'                  { 'list-groups' }
+            '^(lm|list-members)$'                 { 'list-members' }
+            '^(lu|list-users)$'                   { 'list-users' }
+            '^(cg|create-group)$'                 { 'create-group' }
+            '^(rg|rename-group)$'                 { 'rename-group' }
+            '^(dg|remove-group)$'                 { 'remove-group' }
+            '^(au|add-user)$'                     { 'add-user' }
+            '^(ru|remove-user)$'                  { 'remove-user' }
+            default                               { $script:Command }
+        }
     }
 
     if ($script:Command -eq "help") {
@@ -992,7 +1005,7 @@ try {
         default { throw "Unsupported command: $($script:Command)" }
     }
 } catch {
-    $errorMessage = $_.ErrorDetails.Message
+    $errorMessage = $_.ErrorDetails?.Message
     if ([string]::IsNullOrWhiteSpace($errorMessage)) {
         $errorMessage = [string]$_
     }
