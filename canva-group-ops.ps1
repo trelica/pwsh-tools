@@ -7,6 +7,8 @@ $script:ResolvedTeam = $null
 $script:OAuthToken = $null
 $script:ScimToken = $null
 $script:Command = $null
+$script:GroupType = $null
+$script:ScimUsersCache = $null
 
 $script:GroupId = $null
 $script:GroupName = $null
@@ -45,6 +47,11 @@ function Parse-Arguments {
             "^(--list-teams|-ListTeams|-lt)$" { $script:Command = "list-teams"; continue }
             "^(--include-members|-IncludeMembers|-im)$" { $script:IncludeMembers = $true; continue }
             "^(--verbose-output|-VerboseOutput|-v)$" { $script:VerboseOutput = $true; continue }
+            "^(--group-type|-GroupType|-gt)$" {
+                if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
+                $script:GroupType = $argsQueue.Dequeue().ToLowerInvariant()
+                continue
+            }
             "^(--group-id|-GroupId|-gid)$" {
                 if ($argsQueue.Count -eq 0) { throw "Missing value for $token" }
                 $script:GroupId = $argsQueue.Dequeue()
@@ -103,9 +110,9 @@ Canva Group Ops CLI
 
 Commands (choose one):
   --help | -Help | -h
-  --list-teams | -ListTeams | -lt
+  --list-teams | -ListTeams | -lt                                              (Admin API only)
   --list-users | -ListUsers | -lu
-  --list-groups | -ListGroups | -lg [--include-members | -im]
+  --list-groups | -ListGroups | -lg [--include-members | -im] [--team-id <id> | --team-name <name>]
   --list-members | -ListMembers | -lm --group-id <id> | --group-name <name>
   --create-group | -CreateGroup | -cg --group-name <name> [--description <text>]
   --rename-group | -RenameGroup | -rg (--group-id <id> | --group-name <name>) --new-name <name> [--description <text>]
@@ -114,24 +121,42 @@ Commands (choose one):
   --remove-user | -RemoveUser | -ru (--group-id <id> | --group-name <name>) (--user-email <email> | --user-id <id>)
 
 Common options:
+  --group-type <admin|scim> | -GroupType <admin|scim> | -gt <admin|scim>   (default: admin)
   --group-id <id> | -GroupId <id> | -gid <id>
   --group-name <name> | -GroupName <name> | -gn <name>
   --new-name <name> | -NewName <name> | -nn <name>
-  --description <text> | -Description <text> | -d <text>
+  --description <text> | -Description <text> | -d <text>   (admin group type only)
   --user-email <email> | -UserEmail <email> | -ue <email>
   --user-id <id> | -UserId <id> | -uid <id>
-  --team-id <id> | -TeamId <id> | -tid <id>
-  --team-name <name> | -TeamName <name> | -tn <name>
-  --creds-file <path> | -CredsFile <path> | -cf <path>   (default: ./.env)
+  --team-id <id> | -TeamId <id> | -tid <id>                (admin group type only)
+                                                           --list-groups lists every team when omitted
+  --team-name <name> | -TeamName <name> | -tn <name>       (admin group type only)
+  --creds-file <path> | -CredsFile <path> | -cf <path>     (default: ./.env)
+  --include-members | -IncludeMembers | -im
   --verbose-output | -VerboseOutput | -v
+
+Group types:
+  admin  Canva Admin API groups (https://api.canva.com/admin/v1). Needs CANVA_OAUTH_CLIENT_ID/SECRET.
+  scim   Canva SCIM v2 groups (https://www.canva.com/_scim/v2). Needs CANVA_SCIM_TOKEN only.
+         Canva's SCIM API always returns an empty members array, so member listings are
+         only available with --group-type admin.
+
+Environment keys (from .env and/or process env):
+  CANVA_OAUTH_CLIENT_ID
+  CANVA_OAUTH_CLIENT_SECRET
+  CANVA_SCIM_TOKEN
 
 Examples:
   pwsh ./canva-group-ops.ps1 --list-groups
   pwsh ./canva-group-ops.ps1 -lg -im
+  pwsh ./canva-group-ops.ps1 -lg -tn "ByteDance / TikTok"
+  pwsh ./canva-group-ops.ps1 -lg -gt scim
   pwsh ./canva-group-ops.ps1 -lm -gn "ByteDance"
   pwsh ./canva-group-ops.ps1 -cg -gn "Marketing" -d "Marketing team"
+  pwsh ./canva-group-ops.ps1 -cg -gt scim -gn "Marketing"
   pwsh ./canva-group-ops.ps1 -rg -gid G123 -nn "Marketing Ops"
   pwsh ./canva-group-ops.ps1 -au -gn "ByteDance" -ue user@company.com
+  pwsh ./canva-group-ops.ps1 -au -gt scim -gn "ByteDance" -ue user@company.com
   pwsh ./canva-group-ops.ps1 -au -gn "ByteDance" -uid U1234567890
 "@ | Write-Host
 }
@@ -506,15 +531,23 @@ function Resolve-Team {
 }
 
 function Get-AllAdminGroups {
-    param([hashtable]$EnvMap)
+    param(
+        [hashtable]$EnvMap,
+        [string]$AdminTeamId
+    )
 
-    $team = Resolve-Team -EnvMap $EnvMap
+    $resolvedTeamId = $AdminTeamId
+    if ([string]::IsNullOrWhiteSpace($resolvedTeamId)) {
+        $team = Resolve-Team -EnvMap $EnvMap
+        $resolvedTeamId = $team.id
+    }
+
     $headers = Get-AdminHeaders -EnvMap $EnvMap
     $allGroups = @()
     $continuation = $null
 
     do {
-        $url = "$($script:AdminBaseUrl)/teams/$([System.Uri]::EscapeDataString($team.id))/groups?limit=100"
+        $url = "$($script:AdminBaseUrl)/teams/$([System.Uri]::EscapeDataString($resolvedTeamId))/groups?limit=100"
         if ($continuation) {
             $url = "$url&continuation=$([System.Uri]::EscapeDataString($continuation))"
         }
@@ -535,7 +568,8 @@ function Get-AllScimGroups {
 
     $headers = Get-ScimHeaders -EnvMap $EnvMap
     $allGroups = @()
-    $count = 100
+    # Canva's SCIM API caps "count" at 10.
+    $count = 10
     $startIndex = 1
 
     while ($true) {
@@ -562,78 +596,156 @@ function Get-AllScimGroups {
     return $allGroups
 }
 
-function Resolve-GroupIds {
+function Get-AllScimUsers {
+    param([hashtable]$EnvMap)
+
+    if ($null -ne $script:ScimUsersCache) {
+        return $script:ScimUsersCache
+    }
+
+    $headers = Get-ScimHeaders -EnvMap $EnvMap
+    $allUsers = @()
+    # Canva's SCIM API caps "count" at 10.
+    $count = 10
+    $startIndex = 1
+
+    while ($true) {
+        $url = "$($script:ScimBaseUrl)/Users?count=$count&startIndex=$startIndex"
+        $response = Invoke-CanvaRequest -Method "GET" -Url $url -Headers $headers
+        $resources = @()
+        $resourcesProperty = Get-OptionalProperty -InputObject $response -Name "Resources"
+        if ($resourcesProperty) {
+            $resources = @($resourcesProperty)
+        }
+        if ($resources.Count -eq 0) {
+            break
+        }
+
+        $allUsers += $resources
+
+        $totalResults = Get-OptionalProperty -InputObject $response -Name "totalResults"
+        if ($totalResults -and $allUsers.Count -ge [int]$totalResults) {
+            break
+        }
+        $startIndex += $resources.Count
+    }
+
+    $script:ScimUsersCache = $allUsers
+    return $script:ScimUsersCache
+}
+
+function Get-ScimUserEmail {
+    param([object]$ScimUser)
+
+    $emails = Get-OptionalProperty -InputObject $ScimUser -Name "emails"
+    if ($emails) {
+        $primary = @($emails | Where-Object { (Get-OptionalProperty -InputObject $_ -Name "primary" -DefaultValue $false) -eq $true }) | Select-Object -First 1
+        if ($primary) {
+            $primaryValue = Get-OptionalProperty -InputObject $primary -Name "value"
+            if (-not [string]::IsNullOrWhiteSpace([string]$primaryValue)) {
+                return [string]$primaryValue
+            }
+        }
+
+        $first = @($emails) | Select-Object -First 1
+        if ($first) {
+            $firstValue = Get-OptionalProperty -InputObject $first -Name "value"
+            if (-not [string]::IsNullOrWhiteSpace([string]$firstValue)) {
+                return [string]$firstValue
+            }
+        }
+    }
+
+    $userName = Get-OptionalProperty -InputObject $ScimUser -Name "userName"
+    if (-not [string]::IsNullOrWhiteSpace([string]$userName)) {
+        return [string]$userName
+    }
+
+    return $null
+}
+
+function Get-ScimUserByEmail {
     param(
         [hashtable]$EnvMap,
-        [switch]$RequireScim,
-        [switch]$RequireAdmin
+        [Parameter(Mandatory = $true)]
+        [string]$Email
     )
 
-    $adminGroups = Get-AllAdminGroups -EnvMap $EnvMap
-    $scimGroups = Get-AllScimGroups -EnvMap $EnvMap
+    $users = Get-AllScimUsers -EnvMap $EnvMap
+    $needle = $Email.ToLowerInvariant()
+    $found = @($users | Where-Object {
+        $candidate = Get-ScimUserEmail -ScimUser $_
+        $candidate -and $candidate.ToLowerInvariant() -eq $needle
+    })
 
-    $resolvedAdmin = $null
-    $resolvedScim = $null
-    $resolvedName = $null
+    if ($found.Count -eq 0) {
+        throw "No Canva SCIM user found with email '$Email'."
+    }
+    if ($found.Count -gt 1) {
+        throw "Multiple Canva SCIM users found with email '$Email'. Use --user-id."
+    }
+    return $found[0]
+}
 
-    if ($GroupName) {
-        $adminMatches = @($adminGroups | Where-Object { $_.name -eq $GroupName })
-        $scimMatches = @($scimGroups | Where-Object { $_.displayName -eq $GroupName })
+function Resolve-AdminGroup {
+    param([hashtable]$EnvMap)
 
-        if ($adminMatches.Count -eq 0 -and $scimMatches.Count -eq 0) {
-            throw "GroupName '$GroupName' was not found in Admin or SCIM groups."
-        }
-        if ($adminMatches.Count -gt 1 -or $scimMatches.Count -gt 1) {
-            throw "GroupName '$GroupName' matched multiple groups. Use -GroupId."
-        }
-
-        if ($adminMatches.Count -eq 1) {
-            $resolvedAdmin = $adminMatches[0]
-            $resolvedName = $adminMatches[0].name
-        }
-        if ($scimMatches.Count -eq 1) {
-            $resolvedScim = $scimMatches[0]
-            if (-not $resolvedName) {
-                $resolvedName = $scimMatches[0].displayName
-            }
-        }
-    } elseif ($GroupId) {
-        $resolvedAdmin = @($adminGroups | Where-Object { $_.id -eq $GroupId }) | Select-Object -First 1
-        $resolvedScim = @($scimGroups | Where-Object { $_.id -eq $GroupId }) | Select-Object -First 1
-
-        if (-not $resolvedAdmin -and -not $resolvedScim) {
-            throw "GroupId '$GroupId' was not found in Admin or SCIM groups."
-        }
-
-        if ($resolvedAdmin) {
-            $resolvedName = $resolvedAdmin.name
-            if (-not $resolvedScim) {
-                $resolvedScim = @($scimGroups | Where-Object { $_.displayName -eq $resolvedName }) | Select-Object -First 1
-            }
-        } elseif ($resolvedScim) {
-            $resolvedName = $resolvedScim.displayName
-            if (-not $resolvedAdmin) {
-                $resolvedAdmin = @($adminGroups | Where-Object { $_.name -eq $resolvedName }) | Select-Object -First 1
-            }
-        }
-    } else {
-        throw "Either -GroupId or -GroupName is required for action '$Action'."
+    if ([string]::IsNullOrWhiteSpace($GroupId) -and [string]::IsNullOrWhiteSpace($GroupName)) {
+        throw "Provide either --group-id or --group-name."
     }
 
-    if ($RequireAdmin -and -not $resolvedAdmin) {
-        throw "Could not resolve Admin group ID for '$resolvedName'."
-    }
-    if ($RequireScim -and -not $resolvedScim) {
-        throw "Could not resolve SCIM group ID for '$resolvedName'."
+    $groups = Get-AllAdminGroups -EnvMap $EnvMap
+
+    if (-not [string]::IsNullOrWhiteSpace($GroupId)) {
+        $idMatches = @($groups | Where-Object { $_.id -eq $GroupId })
+        if ($idMatches.Count -eq 0) {
+            throw "Admin group ID '$GroupId' was not found."
+        }
+        return $idMatches[0]
     }
 
-    return [PSCustomObject]@{
-        Name      = $resolvedName
-        AdminId   = if ($resolvedAdmin) { $resolvedAdmin.id } else { $null }
-        ScimId    = if ($resolvedScim) { $resolvedScim.id } else { $null }
-        AdminData = $resolvedAdmin
-        ScimData  = $resolvedScim
+    $nameMatches = @($groups | Where-Object { $_.name -eq $GroupName })
+    if ($nameMatches.Count -eq 0) {
+        throw "Admin group '$GroupName' was not found."
     }
+    if ($nameMatches.Count -gt 1) {
+        throw "Multiple Admin groups matched '$GroupName'. Use --group-id."
+    }
+    return $nameMatches[0]
+}
+
+function Resolve-ScimGroup {
+    param([hashtable]$EnvMap)
+
+    if ([string]::IsNullOrWhiteSpace($GroupId) -and [string]::IsNullOrWhiteSpace($GroupName)) {
+        throw "Provide either --group-id or --group-name."
+    }
+
+    $headers = Get-ScimHeaders -EnvMap $EnvMap
+
+    if (-not [string]::IsNullOrWhiteSpace($GroupId)) {
+        $url = "$($script:ScimBaseUrl)/Groups/$([System.Uri]::EscapeDataString($GroupId))"
+        return Invoke-CanvaRequest -Method "GET" -Url $url -Headers $headers
+    }
+
+    $filter = "displayName eq `"$GroupName`""
+    $url = "$($script:ScimBaseUrl)/Groups?filter=$([System.Uri]::EscapeDataString($filter))"
+    $response = Invoke-CanvaRequest -Method "GET" -Url $url -Headers $headers
+
+    $resources = @()
+    $resourcesProperty = Get-OptionalProperty -InputObject $response -Name "Resources"
+    if ($resourcesProperty) {
+        $resources = @($resourcesProperty)
+    }
+
+    $nameMatches = @($resources | Where-Object { $_.displayName -eq $GroupName })
+    if ($nameMatches.Count -eq 0) {
+        throw "SCIM group '$GroupName' was not found."
+    }
+    if ($nameMatches.Count -gt 1) {
+        throw "Multiple SCIM groups matched '$GroupName'. Use --group-id."
+    }
+    return $nameMatches[0]
 }
 
 function Get-UserByEmail {
@@ -684,64 +796,143 @@ function Get-AdminUsersMap {
     return $usersById
 }
 
+function List-ScimGroups {
+    param([hashtable]$EnvMap)
+
+    $groups = Get-AllScimGroups -EnvMap $EnvMap
+    Write-Info "SCIM groups: $($groups.Count)"
+    if ($IncludeMembers) {
+        Write-Info "Canva's SCIM API always returns an empty members array. Use --group-type admin to list members."
+    }
+
+    $groups |
+        Sort-Object -Property displayName |
+        Select-Object id, displayName, externalId |
+        Format-Table -AutoSize
+}
+
 function List-Groups {
     param([hashtable]$EnvMap)
 
-    $team = Resolve-Team -EnvMap $EnvMap
-    $groups = Get-AllAdminGroups -EnvMap $EnvMap
+    if ($GroupType -eq "scim") {
+        List-ScimGroups -EnvMap $EnvMap
+        return
+    }
 
-    Write-Info "Team: $($team.name) ($($team.id))"
-    Write-Info "Groups: $($groups.Count)"
+    # The Admin API requires a teamId to list groups, so with no --team-id/--team-name
+    # we fan out over every team in the organization.
+    $allTeamsMode = $false
+    $teams = @()
+    if ([string]::IsNullOrWhiteSpace($TeamId) -and [string]::IsNullOrWhiteSpace($TeamName)) {
+        $teams = @(Get-AllTeams -EnvMap $EnvMap)
+        if ($teams.Count -gt 1) {
+            $allTeamsMode = $true
+            Write-Info "Listing groups across all $($teams.Count) teams. Use --team-id or --team-name to target one."
+        }
+    } else {
+        $teams = @(Resolve-Team -EnvMap $EnvMap)
+    }
 
-    if (-not $IncludeMembers) {
-        $groups |
-            Sort-Object -Property name |
-            Select-Object id, name, description, created_at, updated_at |
+    $usersById = $null
+    if ($IncludeMembers) {
+        $usersById = Get-AdminUsersMap -EnvMap $EnvMap
+    }
+
+    $rows = @()
+    $totalGroups = 0
+
+    foreach ($team in $teams) {
+        $groups = @(Get-AllAdminGroups -EnvMap $EnvMap -AdminTeamId $team.id)
+        $totalGroups += $groups.Count
+
+        if (-not $IncludeMembers) {
+            foreach ($group in $groups) {
+                $rows += [PSCustomObject]@{
+                    team        = $team.name
+                    team_id     = $team.id
+                    id          = $group.id
+                    name        = $group.name
+                    description = Get-OptionalProperty -InputObject $group -Name "description"
+                    created_at  = Get-OptionalProperty -InputObject $group -Name "created_at"
+                    updated_at  = Get-OptionalProperty -InputObject $group -Name "updated_at"
+                }
+            }
+            continue
+        }
+
+        Write-Host ""
+        Write-Host "=== Team: $($team.name) ($($team.id)) - groups: $($groups.Count)"
+        foreach ($group in ($groups | Sort-Object -Property name)) {
+            $groupDescription = Get-OptionalProperty -InputObject $group -Name "description"
+            Write-Host ""
+            Write-Host "[$($group.id)] $($group.name)"
+            if (-not [string]::IsNullOrWhiteSpace([string]$groupDescription)) {
+                Write-Host "  Description: $groupDescription"
+            }
+
+            $members = Get-GroupMembersInternal -EnvMap $EnvMap -AdminGroupId $group.id -AdminTeamId $team.id
+            if ($members.Count -eq 0) {
+                Write-Host "  Members: (none)"
+                continue
+            }
+
+            Write-Host "  Members: $($members.Count)"
+            foreach ($member in $members) {
+                $user = $usersById[$member.user_id]
+                $emailValue = Get-OptionalProperty -InputObject $user -Name "email"
+                $displayValue = Get-OptionalProperty -InputObject $user -Name "display_name"
+                $email = if (-not [string]::IsNullOrWhiteSpace([string]$emailValue)) { $emailValue } else { "(email unavailable)" }
+                $display = if (-not [string]::IsNullOrWhiteSpace([string]$displayValue)) { $displayValue } else { "(name unavailable)" }
+                Write-Host "   - $($member.user_id) | $email | $display | role=$($member.role)"
+            }
+        }
+    }
+
+    if ($IncludeMembers) {
+        Write-Host ""
+        Write-Info "Groups: $totalGroups"
+        return
+    }
+
+    if (-not $allTeamsMode) {
+        Write-Info "Team: $($teams[0].name) ($($teams[0].id))"
+    }
+    Write-Info "Groups: $totalGroups"
+
+    if ($allTeamsMode) {
+        $rows |
+            Sort-Object -Property team, name |
+            Select-Object team, id, name, description, created_at, updated_at |
             Format-Table -AutoSize
         return
     }
 
-    $usersById = Get-AdminUsersMap -EnvMap $EnvMap
-    foreach ($group in ($groups | Sort-Object -Property name)) {
-        $groupDescription = Get-OptionalProperty -InputObject $group -Name "description"
-        Write-Host ""
-        Write-Host "[$($group.id)] $($group.name)"
-        if (-not [string]::IsNullOrWhiteSpace([string]$groupDescription)) {
-            Write-Host "  Description: $groupDescription"
-        }
-
-        $members = Get-GroupMembersInternal -EnvMap $EnvMap -AdminGroupId $group.id
-        if ($members.Count -eq 0) {
-            Write-Host "  Members: (none)"
-            continue
-        }
-
-        Write-Host "  Members: $($members.Count)"
-        foreach ($member in $members) {
-            $user = $usersById[$member.user_id]
-            $emailValue = Get-OptionalProperty -InputObject $user -Name "email"
-            $displayValue = Get-OptionalProperty -InputObject $user -Name "display_name"
-            $email = if (-not [string]::IsNullOrWhiteSpace([string]$emailValue)) { $emailValue } else { "(email unavailable)" }
-            $display = if (-not [string]::IsNullOrWhiteSpace([string]$displayValue)) { $displayValue } else { "(name unavailable)" }
-            Write-Host "   - $($member.user_id) | $email | $display | role=$($member.role)"
-        }
-    }
+    $rows |
+        Sort-Object -Property name |
+        Select-Object id, name, description, created_at, updated_at |
+        Format-Table -AutoSize
 }
 
 function Get-GroupMembersInternal {
     param(
         [hashtable]$EnvMap,
         [Parameter(Mandatory = $true)]
-        [string]$AdminGroupId
+        [string]$AdminGroupId,
+        [string]$AdminTeamId
     )
 
-    $team = Resolve-Team -EnvMap $EnvMap
+    $resolvedTeamId = $AdminTeamId
+    if ([string]::IsNullOrWhiteSpace($resolvedTeamId)) {
+        $team = Resolve-Team -EnvMap $EnvMap
+        $resolvedTeamId = $team.id
+    }
+
     $headers = Get-AdminHeaders -EnvMap $EnvMap
     $allMembers = @()
     $continuation = $null
 
     do {
-        $url = "$($script:AdminBaseUrl)/teams/$([System.Uri]::EscapeDataString($team.id))/groups/$([System.Uri]::EscapeDataString($AdminGroupId))/members?limit=100"
+        $url = "$($script:AdminBaseUrl)/teams/$([System.Uri]::EscapeDataString($resolvedTeamId))/groups/$([System.Uri]::EscapeDataString($AdminGroupId))/members?limit=100"
         if ($continuation) {
             $url = "$url&continuation=$([System.Uri]::EscapeDataString($continuation))"
         }
@@ -760,12 +951,28 @@ function Get-GroupMembersInternal {
 function List-GroupMembers {
     param([hashtable]$EnvMap)
 
-    $group = Resolve-GroupIds -EnvMap $EnvMap -RequireAdmin
-    $members = Get-GroupMembersInternal -EnvMap $EnvMap -AdminGroupId $group.AdminId
+    if ($GroupType -eq "scim") {
+        $scimGroup = Resolve-ScimGroup -EnvMap $EnvMap
+        $scimMembers = @(Get-OptionalProperty -InputObject $scimGroup -Name "members" -DefaultValue @())
+        Write-Info "SCIM group: $($scimGroup.displayName) ($($scimGroup.id))"
+        Write-Info "Canva's SCIM API always returns an empty members array, even when the group has members."
+        Write-Info "Use --group-type admin to list members."
+        Write-Info "Members returned: $($scimMembers.Count)"
+        if ($scimMembers.Count -gt 0) {
+            $scimMembers |
+                Select-Object @{Name = "user_id"; Expression = { $_.value } }, display, type |
+                Sort-Object -Property display, user_id |
+                Format-Table -AutoSize
+        }
+        return
+    }
+
+    $group = Resolve-AdminGroup -EnvMap $EnvMap
+    $members = Get-GroupMembersInternal -EnvMap $EnvMap -AdminGroupId $group.id
     $usersById = Get-AdminUsersMap -EnvMap $EnvMap
 
-    Write-Info "Group: $($group.Name)"
-    Write-Info "Admin ID: $($group.AdminId)"
+    Write-Info "Group: $($group.name)"
+    Write-Info "Admin ID: $($group.id)"
     Write-Info "Members: $($members.Count)"
 
     $rows = @()
@@ -791,6 +998,18 @@ function Create-Group {
         throw "-GroupName is required for create-group."
     }
 
+    if ($GroupType -eq "scim") {
+        $scimHeaders = Get-ScimHeaders -EnvMap $EnvMap
+        $scimUrl = "$($script:ScimBaseUrl)/Groups"
+        $scimBody = @{
+            schemas     = @("urn:ietf:params:scim:schemas:core:2.0:Group")
+            displayName = $GroupName
+        }
+        $scimResponse = Invoke-CanvaRequest -Method "POST" -Url $scimUrl -Headers $scimHeaders -Body $scimBody
+        Write-Info "Created SCIM group '$($scimResponse.displayName)' with ID $($scimResponse.id)."
+        return
+    }
+
     $team = Resolve-Team -EnvMap $EnvMap
     $headers = Get-AdminJsonHeaders -EnvMap $EnvMap
     $url = "$($script:AdminBaseUrl)/teams/$([System.Uri]::EscapeDataString($team.id))/groups"
@@ -802,7 +1021,7 @@ function Create-Group {
     }
 
     $response = Invoke-CanvaRequest -Method "POST" -Url $url -Headers $headers -Body $body
-    Write-Info "Created group '$($response.group.name)' with Admin ID $($response.group.id)."
+    Write-Info "Created Admin group '$($response.group.name)' with ID $($response.group.id)."
 }
 
 function Rename-Group {
@@ -812,36 +1031,64 @@ function Rename-Group {
         throw "-NewName is required for rename-group."
     }
 
+    if ($GroupType -eq "scim") {
+        $scimGroup = Resolve-ScimGroup -EnvMap $EnvMap
+        $scimHeaders = Get-ScimHeaders -EnvMap $EnvMap
+        $scimUrl = "$($script:ScimBaseUrl)/Groups/$([System.Uri]::EscapeDataString($scimGroup.id))"
+        $scimBody = @{
+            schemas    = @("urn:ietf:params:scim:api:messages:2.0:PatchOp")
+            Operations = @(
+                @{
+                    op    = "replace"
+                    path  = "displayName"
+                    value = $NewName
+                }
+            )
+        }
+        Invoke-CanvaRequest -Method "PATCH" -Url $scimUrl -Headers $scimHeaders -Body $scimBody | Out-Null
+        Write-Info "Renamed SCIM group '$($scimGroup.displayName)' -> '$NewName' (ID $($scimGroup.id))."
+        return
+    }
+
     $team = Resolve-Team -EnvMap $EnvMap
-    $group = Resolve-GroupIds -EnvMap $EnvMap -RequireAdmin
+    $group = Resolve-AdminGroup -EnvMap $EnvMap
 
     $headers = Get-AdminJsonHeaders -EnvMap $EnvMap
-    $url = "$($script:AdminBaseUrl)/teams/$([System.Uri]::EscapeDataString($team.id))/groups/$([System.Uri]::EscapeDataString($group.AdminId))"
+    $url = "$($script:AdminBaseUrl)/teams/$([System.Uri]::EscapeDataString($team.id))/groups/$([System.Uri]::EscapeDataString($group.id))"
     $body = @{
         name = $NewName
     }
-    if ($PSBoundParameters.ContainsKey("Description")) {
+    if (-not [string]::IsNullOrWhiteSpace($Description)) {
         $body["description"] = $Description
     } else {
-        $existingDescription = Get-OptionalProperty -InputObject $group.AdminData -Name "description"
+        $existingDescription = Get-OptionalProperty -InputObject $group -Name "description"
         if (-not [string]::IsNullOrWhiteSpace([string]$existingDescription)) {
             $body["description"] = $existingDescription
         }
     }
 
     $response = Invoke-CanvaRequest -Method "PATCH" -Url $url -Headers $headers -Body $body
-    Write-Info "Renamed group '$($group.Name)' -> '$($response.group.name)' (Admin ID $($response.group.id))."
+    Write-Info "Renamed Admin group '$($group.name)' -> '$($response.group.name)' (ID $($response.group.id))."
 }
 
 function Remove-Group {
     param([hashtable]$EnvMap)
 
+    if ($GroupType -eq "scim") {
+        $scimGroup = Resolve-ScimGroup -EnvMap $EnvMap
+        $scimHeaders = Get-ScimHeaders -EnvMap $EnvMap
+        $scimUrl = "$($script:ScimBaseUrl)/Groups/$([System.Uri]::EscapeDataString($scimGroup.id))"
+        Invoke-CanvaRequest -Method "DELETE" -Url $scimUrl -Headers $scimHeaders | Out-Null
+        Write-Info "Deleted SCIM group '$($scimGroup.displayName)' (ID $($scimGroup.id))."
+        return
+    }
+
     $team = Resolve-Team -EnvMap $EnvMap
-    $group = Resolve-GroupIds -EnvMap $EnvMap -RequireAdmin
+    $group = Resolve-AdminGroup -EnvMap $EnvMap
     $headers = Get-AdminHeaders -EnvMap $EnvMap
-    $url = "$($script:AdminBaseUrl)/teams/$([System.Uri]::EscapeDataString($team.id))/groups/$([System.Uri]::EscapeDataString($group.AdminId))"
+    $url = "$($script:AdminBaseUrl)/teams/$([System.Uri]::EscapeDataString($team.id))/groups/$([System.Uri]::EscapeDataString($group.id))"
     Invoke-CanvaRequest -Method "DELETE" -Url $url -Headers $headers | Out-Null
-    Write-Info "Deleted group '$($group.Name)' (Admin ID $($group.AdminId))."
+    Write-Info "Deleted Admin group '$($group.name)' (ID $($group.id))."
 }
 
 function Update-GroupMembership {
@@ -851,11 +1098,54 @@ function Update-GroupMembership {
         [string]$Operation
     )
 
-    $group = Resolve-GroupIds -EnvMap $EnvMap -RequireScim
-
     if ($script:UserIds.Count -eq 0 -and $script:UserEmails.Count -eq 0) {
         throw "Provide --user-email or --user-id."
     }
+
+    if ($GroupType -eq "scim") {
+        $scimGroup = Resolve-ScimGroup -EnvMap $EnvMap
+
+        $scimTargets = @()
+        foreach ($uid in $script:UserIds) {
+            $scimTargets += [PSCustomObject]@{ Id = $uid; Label = $uid }
+        }
+        foreach ($email in $script:UserEmails) {
+            try {
+                $scimUser = Get-ScimUserByEmail -EnvMap $EnvMap -Email $email
+                $scimTargets += [PSCustomObject]@{ Id = $scimUser.id; Label = $email }
+            } catch {
+                Write-Host "[error] $($email): $_"
+            }
+        }
+
+        if ($scimTargets.Count -eq 0) { return }
+
+        $scimHeaders = Get-ScimHeaders -EnvMap $EnvMap
+        $scimUrl = "$($script:ScimBaseUrl)/Groups/$([System.Uri]::EscapeDataString($scimGroup.id))"
+
+        foreach ($target in $scimTargets) {
+            $scimBody = @{
+                schemas    = @("urn:ietf:params:scim:api:messages:2.0:PatchOp")
+                Operations = @(
+                    @{
+                        op    = $Operation
+                        path  = "members"
+                        value = @(@{ value = $target.Id })
+                    }
+                )
+            }
+            try {
+                Invoke-CanvaRequest -Method "PATCH" -Url $scimUrl -Headers $scimHeaders -Body $scimBody | Out-Null
+                Write-Info "$Operation user '$($target.Label)' (id=$($target.Id)) in SCIM group '$($scimGroup.displayName)' (ID $($scimGroup.id))."
+            } catch {
+                Write-Host "[error] $($target.Label): $_"
+            }
+        }
+        return
+    }
+
+    $team = Resolve-Team -EnvMap $EnvMap
+    $group = Resolve-AdminGroup -EnvMap $EnvMap
 
     $targets = @()
     foreach ($uid in $script:UserIds) {
@@ -872,23 +1162,22 @@ function Update-GroupMembership {
 
     if ($targets.Count -eq 0) { return }
 
-    $headers = Get-ScimHeaders -EnvMap $EnvMap
-    $url = "$($script:ScimBaseUrl)/Groups/$([System.Uri]::EscapeDataString($group.ScimId))"
+    $headers = Get-AdminJsonHeaders -EnvMap $EnvMap
+    $membersUrl = "$($script:AdminBaseUrl)/teams/$([System.Uri]::EscapeDataString($team.id))/groups/$([System.Uri]::EscapeDataString($group.id))/members"
 
     foreach ($target in $targets) {
-        $body = @{
-            schemas    = @("urn:ietf:params:scim:api:messages:2.0:PatchOp")
-            Operations = @(
-                @{
-                    op    = $Operation
-                    path  = "members"
-                    value = @(@{ value = $target.Id })
-                }
-            )
-        }
         try {
-            Invoke-CanvaRequest -Method "PATCH" -Url $url -Headers $headers -Body $body | Out-Null
-            Write-Info "$Operation user '$($target.Label)' (id=$($target.Id)) in group '$($group.Name)' (scimId=$($group.ScimId))."
+            if ($Operation -eq "add") {
+                $body = @{
+                    user_id = $target.Id
+                    role    = "member"
+                }
+                Invoke-CanvaRequest -Method "POST" -Url $membersUrl -Headers $headers -Body $body | Out-Null
+            } else {
+                $deleteUrl = "$membersUrl/$([System.Uri]::EscapeDataString($target.Id))"
+                Invoke-CanvaRequest -Method "DELETE" -Url $deleteUrl -Headers $headers | Out-Null
+            }
+            Write-Info "$Operation user '$($target.Label)' (id=$($target.Id)) in Admin group '$($group.name)' (ID $($group.id))."
         } catch {
             Write-Host "[error] $($target.Label): $_"
         }
@@ -897,6 +1186,23 @@ function Update-GroupMembership {
 
 function List-Users {
     param([hashtable]$EnvMap)
+
+    if ($GroupType -eq "scim") {
+        $scimUsers = Get-AllScimUsers -EnvMap $EnvMap
+        Write-Info "SCIM users: $($scimUsers.Count)"
+        $rows = @()
+        foreach ($scimUser in $scimUsers) {
+            $rows += [PSCustomObject]@{
+                id          = [string](Get-OptionalProperty -InputObject $scimUser -Name "id")
+                userName    = [string](Get-OptionalProperty -InputObject $scimUser -Name "userName")
+                email       = Get-ScimUserEmail -ScimUser $scimUser
+                active      = Get-OptionalProperty -InputObject $scimUser -Name "active"
+                displayName = [string](Get-OptionalProperty -InputObject $scimUser -Name "displayName")
+            }
+        }
+        $rows | Sort-Object -Property email, userName | Format-Table -AutoSize
+        return
+    }
 
     $headers = Get-AdminHeaders -EnvMap $EnvMap
     $continuation = $null
@@ -965,6 +1271,27 @@ try {
         exit 0
     }
 
+    if ($script:Command -eq "list-teams") {
+        if (-not [string]::IsNullOrWhiteSpace($script:GroupType) -and $script:GroupType -ne "admin") {
+            throw "--list-teams is only available with --group-type admin."
+        }
+    } else {
+        if ([string]::IsNullOrWhiteSpace($script:GroupType)) {
+            if ($script:Interactive) {
+                $script:GroupType = Read-Prompt -Message "Group type (admin/scim)" -Default "admin"
+            } else {
+                $script:GroupType = "admin"
+            }
+        }
+        $script:GroupType = $script:GroupType.ToLowerInvariant()
+        if ($script:GroupType -notin @("admin", "scim")) {
+            throw "Unsupported --group-type '$($script:GroupType)'. Allowed: admin, scim."
+        }
+        if ($script:GroupType -eq "scim" -and -not [string]::IsNullOrWhiteSpace($script:Description)) {
+            throw "--description is only supported with --group-type admin. SCIM groups have no description attribute."
+        }
+    }
+
     if ($script:Command -in @("list-members", "rename-group", "remove-group", "add-user", "remove-user", "create-group")) {
         if ([string]::IsNullOrWhiteSpace($GroupId) -and [string]::IsNullOrWhiteSpace($GroupName)) {
             $script:GroupName = Read-Prompt -Message "Group name"
@@ -995,7 +1322,8 @@ try {
     } else {
         Write-VerboseInfo "Loaded env keys from '$CredsFile'."
     }
-    if ($script:Command -ne "list-teams") {
+    $skipTeamBanner = ($script:Command -eq "list-groups" -and [string]::IsNullOrWhiteSpace($script:TeamId) -and [string]::IsNullOrWhiteSpace($script:TeamName))
+    if ($script:Command -ne "list-teams" -and $script:GroupType -eq "admin" -and -not $skipTeamBanner) {
         $resolvedTeam = Resolve-Team -EnvMap $envMap
         Write-Info "Using team: $($resolvedTeam.name) ($($resolvedTeam.id))"
     }
@@ -1016,6 +1344,9 @@ try {
     if ($script:Interactive) {
         $parts = @("pwsh ./canva-group-ops.ps1")
         $parts += "--$($script:Command)"
+        if ($script:Command -ne "list-teams" -and -not [string]::IsNullOrWhiteSpace($script:GroupType)) {
+            $parts += "--group-type $($script:GroupType)"
+        }
         if (-not [string]::IsNullOrWhiteSpace($script:GroupId))      { $parts += "--group-id $($script:GroupId)" }
         if (-not [string]::IsNullOrWhiteSpace($script:GroupName))    { $parts += "--group-name `"$($script:GroupName)`"" }
         if (-not [string]::IsNullOrWhiteSpace($script:NewName))      { $parts += "--new-name `"$($script:NewName)`"" }
